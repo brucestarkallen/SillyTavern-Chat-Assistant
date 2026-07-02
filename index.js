@@ -696,30 +696,67 @@
 
     function el(id) { return document.getElementById(id); }
 
+    async function copyText(t) {
+        try { await navigator.clipboard.writeText(t); return true; } catch (e) { /* insecure origin etc. */ }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = t;
+            ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            ta.remove();
+            return ok;
+        } catch (e) { return false; }
+    }
+
     function showViewer(title, text) {
         let v = el('cc_viewer');
         if (!v) {
             v = document.createElement('div');
             v.id = 'cc_viewer';
-            v.innerHTML = [
-                '<div id="cc_viewer_box">',
-                '  <div id="cc_viewer_head">',
-                '    <span id="cc_viewer_title"></span>',
-                '    <button class="cc_btn" id="cc_viewer_copy">Copy</button>',
-                '    <button class="cc_btn" id="cc_viewer_close">Close</button>',
-                '  </div>',
-                '  <pre id="cc_viewer_pre"></pre>',
-                '</div>',
-            ].join('\n');
+            v.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+
+            const box = document.createElement('div');
+            box.style.cssText = 'display:flex;flex-direction:column;width:min(860px,94vw);height:86vh;max-height:86vh;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:#1e1e1e;color:var(--SmartThemeBodyColor,#ddd);box-shadow:0 8px 30px rgba(0,0,0,0.5);overflow:hidden;';
+
+            const head = document.createElement('div');
+            head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.2);flex:0 0 auto;';
+
+            const titleEl = document.createElement('span');
+            titleEl.id = 'cc_viewer_title';
+            titleEl.style.cssText = 'flex:1 1 auto;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+
+            const btnStyle = 'cursor:pointer;border:1px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.08);color:inherit;border-radius:6px;padding:6px 14px;font-size:0.9em;flex:0 0 auto;';
+            const copyBtn = document.createElement('button');
+            copyBtn.textContent = 'Copy';
+            copyBtn.style.cssText = btnStyle;
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = 'Close';
+            closeBtn.style.cssText = btnStyle;
+
+            const pre = document.createElement('pre');
+            pre.id = 'cc_viewer_pre';
+            pre.style.cssText = 'flex:1 1 auto;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:0.85em;max-width:100%;';
+
+            head.appendChild(titleEl);
+            head.appendChild(copyBtn);
+            head.appendChild(closeBtn);
+            box.appendChild(head);
+            box.appendChild(pre);
+            v.appendChild(box);
             document.body.appendChild(v);
-            el('cc_viewer_close').addEventListener('click', () => { v.style.display = 'none'; });
-            el('cc_viewer_copy').addEventListener('click', async () => {
-                try {
-                    await navigator.clipboard.writeText(el('cc_viewer_pre').textContent);
-                    toast('Copied to clipboard.', 'success');
-                } catch (e) { toast('Copy failed: ' + e.message, 'error'); }
+
+            const hide = () => { v.style.display = 'none'; };
+            closeBtn.addEventListener('click', hide);
+            v.addEventListener('click', (e) => { if (e.target === v) hide(); });
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && v.style.display !== 'none') hide();
             });
-            v.addEventListener('click', (e) => { if (e.target === v) v.style.display = 'none'; });
+            copyBtn.addEventListener('click', async () => {
+                const ok = await copyText(pre.textContent);
+                toast(ok ? 'Copied to clipboard.' : 'Copy failed — select the text manually.', ok ? 'success' : 'error');
+            });
         }
         el('cc_viewer_title').textContent = title;
         el('cc_viewer_pre').textContent = text;
