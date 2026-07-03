@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.9.4';
+    const VERSION = '1.9.6';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1148,7 +1148,9 @@
             let reply = '';
             let think = '';
             const rounds = Math.max(0, Math.min(6, Number(settings.fetchRounds) || 0));
+            const fetchedIds = new Set();
             for (let round = 0; round <= rounds; round++) {
+                if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
                 const raw = await callLLM(messages, live);
                 const split = splitThinking(raw);
                 reply = split.rest;
@@ -1160,11 +1162,24 @@
                 }
                 const ids = parseFetch(reply);
                 if (!ids || round === rounds) break;
-                addBubble('note', 'Copilot read full text of #' + ids.join(', #'));
-                pushHistory('note', 'Copilot read full text of #' + ids.join(', #'));
+                const fresh = ids.filter(x => !fetchedIds.has(Number(x)));
+                ids.forEach(x => fetchedIds.add(Number(x)));
                 messages.push({ role: 'assistant', content: reply });
-                messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(ids) });
+                if (fresh.length) {
+                    const note = 'Copilot read full text of #' + fresh.join(', #') + ' (fetch ' + (round + 1) + '/' + rounds + ')' + (fresh.length < ids.length ? ' \u2014 skipped ' + (ids.length - fresh.length) + ' already-fetched' : '');
+                    addBubble('note', note);
+                    pushHistory('note', note);
+                    let payload = '[FETCHED MESSAGES]\n' + fullTextOf(fresh);
+                    if (round === rounds - 1) payload += '\n\n(This was your final fetch \u2014 produce your complete answer now; further fetch requests will not be served.)';
+                    messages.push({ role: 'user', content: payload });
+                } else {
+                    const note = 'Copilot re-requested already-fetched messages \u2014 told it to answer now.';
+                    addBubble('note', note);
+                    pushHistory('note', note);
+                    messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n(All requested ids were already provided earlier in this conversation \u2014 re-read them above instead of re-fetching. If you need DIFFERENT messages, fetch those; otherwise produce your complete final answer.)' });
+                }
             }
+            const exhausted = parseFetch(reply);
 
             busy.remove();
             if (Number.isInteger(opts.swipeIdx)) {
@@ -1185,6 +1200,12 @@
                 pushHistory('assistant', reply, think);
             }
             renderHistory();
+
+            if (exhausted) {
+                const warn = '\u26A0 Ran out of fetch rounds while the copilot was still requesting messages \u2014 the answer may be incomplete. Raise "Fetch rounds" in settings, or narrow the request (e.g. one snippet/layer at a time).';
+                addBubble('note', warn);
+                pushHistory('note', warn);
+            }
 
             const parsed = parseEdits(reply);
             const parsedMem = parseMemEdits(reply);
