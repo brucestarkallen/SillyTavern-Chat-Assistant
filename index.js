@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.9.0';
+    const VERSION = '1.9.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1346,7 +1346,7 @@
                 'You are a ruthless story editor reviewing a long-form roleplay. Produce STANDING NOTES for the storyteller AI: concrete, reusable craft corrections that fix systemic weaknesses.',
                 'Analyze for: claustrophobia (everything orbiting the MC), dropped characters or props (people who vanish mid-scene), missing ambient world life (background events, crowds, random encounters, off-screen agendas), repeated mistakes, contradictions with the world\'s own rules, and stale pacing.',
                 'Also mine any OOC/meta exchanges in the chat (corrections in (( )), [brackets], or marked OOC) for lessons the storyteller was already told.',
-                'Write 5-10 numbered standing corrections, each actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Under 220 words. Output ONLY the notes.',
+                'Write numbered standing corrections \u2014 as many as the story genuinely needs, no maximum. Each must be actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Optimize for perfection, immersion, engagement, and realism \u2014 while staying token-efficient: no padding, no repetition, no filler; every line must earn its place. Output ONLY the notes.',
             ].join('\n');
             const user = buildContextBlock() + (cur ? '\n\n[CURRENT NOTES]\n' + cur : '') + '\n\nWrite the standing notes now.';
             const raw = await callLLM([
