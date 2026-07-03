@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.8.7';
+    const VERSION = '1.8.9';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -80,6 +80,8 @@
         '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then find (1) events, facts, or state changes MISSING from the memory and (2) memory entries that are stale or contradicted by the chat. Propose every correction in a single <memedits> block with "find" copied verbatim from [STORY MEMORY]. Do NOT propose <edits> to chat messages unless I explicitly ask.',
         '#f = Check the chat against [STORY MEMORY] and fix every continuity error you find with a single <edits> block.',
         '#o = Scan the chat for OOC/meta exchanges (out-of-character notes, corrections, discussions in (( )), [brackets], or marked OOC). Use <fetch> as needed. For each lesson found: (1) propose <edits> fixing any story text it corrected, (2) propose <memedits> persisting the lesson into the notepad, Author\'s Note (path note_prompt), or editor notes (path cc_critique), and (3) propose hiding the pure-OOC messages from AI context with {"id": n, "hide": true} entries. Nothing is deleted \u2014 hidden text stays in the log.',
+        '#a = FIDELITY audit of the memory. For each snippet, use its "(covers chat messages #x to #y)" note to <fetch> the original ghosted messages, then verify two things: does the snippet text capture every plot-relevant event, and does its audit/detail field preserve the concrete facts (names, numbers, objects, places, injuries, promises, who-knows-what)? Report anything LOST or DISTORTED and propose <memedits> restoring the missing details into the snippet text or its detail field. If the memory is large, process ONE snippet per run and tell me where you stopped so I can continue.',
+        '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.',
         '#i = Brainstorm what could happen next. Give 3-5 distinct directions for the upcoming scene(s), each consistent with [STORY MEMORY] and the current situation: a one-line hook plus what it would develop. Do not write the scene itself and do not propose <edits>.',
     ].join('\n');
 
@@ -331,6 +333,9 @@
             }
             if (Array.isArray(n)) { n.forEach((v2, i) => walk(v2, p2 + '[' + i + ']')); return; }
             if (n && typeof n === 'object') {
+                if (Array.isArray(n.turnRange) && n.turnRange.length === 2) {
+                    out.push('(' + p2 + ' covers chat messages #' + n.turnRange[0] + ' to #' + n.turnRange[1] + ')');
+                }
                 const entries = Object.entries(n);
                 // Direct text fields first (e.g. notepad), nested structures after (e.g. layers).
                 for (const [k, v2] of entries) { if (typeof v2 === 'string') walk(v2, p2 + '.' + k); }
