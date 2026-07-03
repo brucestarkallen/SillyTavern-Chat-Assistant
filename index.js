@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.3.2';
+    const VERSION = '1.5.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -61,6 +61,7 @@
         '[{"find": "exact text copied character-for-character from [STORY MEMORY]", "replace": "corrected text", "reason": "short why"}]',
         '</memedits>',
         '- "find" must be verbatim from [STORY MEMORY] and long enough to be unique. Keep corrections minimal and in the same style.',
+        '- To replace an ENTIRE memory field, use {"path": "summaryception.notepad", "replace": "new full text", "reason": "..."} with the exact path shown in [STORY MEMORY] section headers. Adding "find" alongside "path" replaces only within that field.',
         '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
     ].join('\n');
 
@@ -110,6 +111,8 @@
     let undoStack = [];      // [{label, items:[{id, before}]}]
     let running = false;
     let inited = false;
+    let stopRequested = false;
+    let abortCtl = null;
 
     // ------------------------------------------------------------------
     // Small helpers
@@ -228,6 +231,22 @@
         renderSessions();
         renderHistory();
         renderEditCards();
+    }
+
+    function branchSession() {
+        const m = metaRoot();
+        const cur = meta();
+        const id = Math.max(0, ...m.sessions.map(x => x.id)) + 1;
+        const name = (cur.name + ' (branch)').slice(0, 40);
+        m.sessions.push({ id, name, history: JSON.parse(JSON.stringify(cur.history)) });
+        m.activeId = id;
+        saveMeta();
+        pendingEdits = [];
+        undoStack = [];
+        renderSessions();
+        renderHistory();
+        renderEditCards();
+        addBubble('note', 'Branched from "' + cur.name + '" \u2014 this copy is independent of the original.');
     }
 
     function renameSession() {
@@ -420,15 +439,19 @@
         const c = ctx();
         const pid = settings.profileId;
         const maxTok = Number(settings.maxTokens) || 2048;
+        stopRequested = false;
+        try { abortCtl = new AbortController(); } catch (e) { abortCtl = null; }
 
         if (pid && c.ConnectionManagerRequestService?.sendRequest) {
             if (settings.streaming) {
                 try {
-                    const res = await c.ConnectionManagerRequestService.sendRequest(pid, messages, maxTok, { stream: true });
+                    const res = await c.ConnectionManagerRequestService.sendRequest(pid, messages, maxTok, { stream: true, signal: abortCtl?.signal });
                     if (typeof res === 'function') {
                         let acc = '';
                         let reasoning = '';
+                        try {
                         for await (const chunk of res()) {
+                            if (stopRequested) break;
                             if (typeof chunk === 'string') {
                                 acc = grow(acc, chunk);
                             } else {
@@ -438,6 +461,7 @@
                             }
                             if (onPartial) onPartial(acc, reasoning);
                         }
+                        } catch (se) { if (!stopRequested) throw se; }
                         if (reasoning && !/<think|<reasoning/i.test(acc)) {
                             return '<think>' + reasoning + '</think>\n' + acc;
                         }
@@ -448,8 +472,13 @@
                     console.warn(LOG, 'streaming failed, retrying without stream', e);
                 }
             }
-            const res = await c.ConnectionManagerRequestService.sendRequest(pid, messages, maxTok);
-            return extractText(res);
+            try {
+                const res = await c.ConnectionManagerRequestService.sendRequest(pid, messages, maxTok, { signal: abortCtl?.signal });
+                return extractText(res);
+            } catch (se) {
+                if (stopRequested) return '';
+                throw se;
+            }
         }
 
         // Fallback: current connection, raw generation (no streaming here).
@@ -459,8 +488,13 @@
             .map(m => (m.role === 'user' ? '[User]\n' : '[Copilot]\n') + m.content)
             .join('\n\n') + '\n\n[Copilot]\n';
         if (typeof c.generateRaw === 'function') {
-            const res = await c.generateRaw({ prompt: convo, systemPrompt: sys });
-            return extractText(res);
+            try {
+                const res = await c.generateRaw({ prompt: convo, systemPrompt: sys });
+                return extractText(res);
+            } catch (se) {
+                if (stopRequested) return '';
+                throw se;
+            }
         }
         throw new Error('No generation backend found. Pick a Connection Profile in the panel settings (gear icon).');
     }
@@ -523,8 +557,10 @@
             const edits = [];
             for (const e of arr) {
                 if (!e || typeof e !== 'object') continue;
-                if (typeof e.find !== 'string' || !e.find.length) continue;
-                edits.push({ kind: 'mem', find: e.find, replace: String(e.replace ?? ''), reason: String(e.reason ?? ''), status: 'pending' });
+                const path = (typeof e.path === 'string' && e.path.trim()) ? e.path.trim() : null;
+                const find = (typeof e.find === 'string' && e.find.length) ? e.find : null;
+                if (!find && !path) continue;
+                edits.push({ kind: 'mem', path, find, replace: String(e.replace ?? ''), reason: String(e.reason ?? ''), status: 'pending' });
             }
             return { edits };
         } catch (err) {
@@ -722,6 +758,35 @@
         let re;
         try { re = new RegExp(settings.memoryKeyPattern, 'i'); }
         catch (e) { re = /summar|ception|memory/i; }
+        if (edit.path) {
+            const tokens = String(edit.path).match(/[^.\[\]]+/g) || [];
+            if (!tokens.length) return { ok: false, reason: 'bad path' };
+            const rootKey = tokens[0];
+            if (rootKey === MODULE || !re.test(rootKey) || md[rootKey] == null) {
+                return { ok: false, reason: 'path not in memory scope' };
+            }
+            let parent = md;
+            let key = rootKey;
+            let node = md[rootKey];
+            for (let t = 1; t < tokens.length; t++) {
+                if (node == null || typeof node !== 'object') return { ok: false, reason: 'path not found' };
+                parent = node;
+                key = /^\d+$/.test(tokens[t]) ? Number(tokens[t]) : tokens[t];
+                node = parent[key];
+            }
+            if (typeof node !== 'string') return { ok: false, reason: 'path is not a text field' };
+            const backupVal = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+            if (edit.find) {
+                const loc = locate(node, edit.find);
+                if (!loc) return { ok: false, reason: '"find" text not located at that path' };
+                if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                parent[key] = node.slice(0, loc.start) + String(edit.replace ?? '') + node.slice(loc.end);
+                return { ok: true, path: edit.path, fuzzy: !!loc.fuzzy };
+            }
+            if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+            parent[key] = String(edit.replace ?? '');
+            return { ok: true, path: edit.path + ' (full replace)', fuzzy: false };
+        }
         for (const [key, val] of Object.entries(md)) {
             if (key === MODULE || !re.test(key) || val == null) continue;
             if (typeof val === 'string') {
@@ -856,6 +921,14 @@
                 : { role: h.role, content: h.content });
     }
 
+    function requestStop() {
+        if (!running) return;
+        stopRequested = true;
+        try { abortCtl?.abort(); } catch (e) { /* ignore */ }
+        try { ctx().stopGeneration?.(); } catch (e) { /* ignore */ }
+        toast('Stopping\u2026', 'info');
+    }
+
     async function send(userText) {
         userText = String(userText || '').trim();
         if (!userText || running) return;
@@ -911,6 +984,10 @@
                 const split = splitThinking(raw);
                 reply = split.rest;
                 think = split.think;
+                if (stopRequested) {
+                    addBubble('note', 'Generation stopped \u2014 partial reply kept.');
+                    break;
+                }
                 const ids = parseFetch(reply);
                 if (!ids || round === rounds) break;
                 addBubble('note', 'Copilot read full text of #' + ids.join(', #'));
@@ -920,7 +997,7 @@
 
             busy.remove();
             pushHistory('assistant', reply, think);
-            addAiBubble(reply, think);
+            addAiBubble(reply, think, meta().history.length - 1);
 
             const parsed = parseEdits(reply);
             const parsedMem = parseMemEdits(reply);
@@ -985,6 +1062,16 @@
         addBubble('note', 'Editing \u2014 press Send to continue from here.');
     }
 
+    function deleteMessageAt(idx) {
+        if (running) return;
+        const h = meta().history;
+        if (!h[idx]) return;
+        if (!confirm('Delete this message from the copilot conversation?')) return;
+        h.splice(idx, 1);
+        saveMeta();
+        renderHistory();
+    }
+
     // ------------------------------------------------------------------
     // Director: secret episode directive injected into the storyteller
     // ------------------------------------------------------------------
@@ -1035,6 +1122,7 @@
                 { role: 'system', content: directorAuthorPrompt(mode) },
                 { role: 'user', content: user },
             ]);
+            if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             const text = splitThinking(raw).rest.trim();
             if (!text) throw new Error('empty directive');
             const ep = mode === 'next' ? ((prev?.episode || 0) + 1) : (prev?.episode || 1);
@@ -1081,6 +1169,7 @@
                 { role: 'system', content: directorAuthorPrompt('edit') },
                 { role: 'user', content: user },
             ]);
+            if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             const text = splitThinking(raw).rest.trim();
             if (!text) throw new Error('empty directive');
             const ep = prev?.episode || 1;
@@ -1118,6 +1207,7 @@
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
             ]);
+            if (stopRequested) { addBubble('note', 'Stopped.'); return; }
             const line = splitThinking(raw).rest.trim().split('\n')[0].slice(0, 200);
             addBubble('note', '\uD83C\uDFAC ' + line);
             pushHistory('note', '\uD83C\uDFAC ' + line);
@@ -1305,9 +1395,10 @@
             '  <span class="cc_hbtn" id="cc_gear" title="Settings"><i class="fa-solid fa-gear"></i></span>',
             '  <span class="cc_hbtn" id="cc_close" title="Close"><i class="fa-solid fa-xmark"></i></span>',
             '</div>',
-            '<div id="cc_sessbar" style="display:flex;gap:6px;padding:6px 10px;align-items:center;flex:0 0 auto;border-bottom:1px solid rgba(255,255,255,0.15);">',
+            '<div id="cc_sessbar" style="display:flex;gap:6px;padding:6px 10px;align-items:center;flex-wrap:wrap;flex:0 0 auto;border-bottom:1px solid rgba(255,255,255,0.15);">',
             '  <select id="cc_sess" style="flex:1 1 auto;min-width:0;background:rgba(0,0,0,0.25);color:inherit;border:1px solid rgba(255,255,255,0.25);border-radius:5px;padding:4px 6px;font-size:0.85em;"></select>',
             '  <button class="cc_btn" id="cc_sessnew" title="New session (fresh context for a new problem)">+ New</button>',
+            '  <button class="cc_btn" id="cc_sessbr" title="Branch: copy this session into a new one">Branch</button>',
             '  <button class="cc_btn" id="cc_sessren" title="Rename this session">Ren</button>',
             '  <button class="cc_btn" id="cc_sessdel" title="Delete this session">Del</button>',
             '</div>',
@@ -1346,6 +1437,7 @@
             refreshProfileSelect();
         });
         el('cc_send').addEventListener('click', () => {
+            if (running) { requestStop(); return; }
             const t = el('cc_input').value;
             el('cc_input').value = '';
             send(t);
@@ -1353,7 +1445,7 @@
         el('cc_input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                el('cc_send').click();
+                if (!running) el('cc_send').click();
             }
         });
         el('cc_audit').addEventListener('click', () => send(AUDIT_PROMPT));
@@ -1366,6 +1458,7 @@
         el('cc_dirpeek').addEventListener('click', () => peekDirective());
         el('cc_sess').addEventListener('change', () => switchSession(el('cc_sess').value));
         el('cc_sessnew').addEventListener('click', () => newSession());
+        el('cc_sessbr').addEventListener('click', () => branchSession());
         el('cc_sessren').addEventListener('click', () => renameSession());
         el('cc_sessdel').addEventListener('click', () => deleteSession());
         el('cc_undo').addEventListener('click', () => undoLast());
@@ -1505,11 +1598,32 @@
 
     function setBusy(b) {
         const btn = el('cc_send');
-        if (btn) btn.disabled = b;
+        if (btn) {
+            btn.textContent = b ? 'Stop' : 'Send';
+            btn.style.background = b ? 'rgba(220,90,90,0.85)' : '';
+        }
         const au = el('cc_audit');
         if (au) au.disabled = b;
         const rt = el('cc_retry');
         if (rt) rt.disabled = b;
+    }
+
+    function attachMsgIcons(div, kind, hidx) {
+        if (!Number.isInteger(hidx)) return;
+        if (kind === 'user') {
+            const pen = document.createElement('span');
+            pen.textContent = '\u270E';
+            pen.title = 'Edit this message and continue from here';
+            pen.style.cssText = 'margin-left:8px;cursor:pointer;opacity:0.6;font-size:0.95em;';
+            pen.addEventListener('click', () => startEditUserMessage(hidx));
+            div.appendChild(pen);
+        }
+        const bin = document.createElement('span');
+        bin.textContent = '\u2715';
+        bin.title = 'Delete this message';
+        bin.style.cssText = 'margin-left:8px;cursor:pointer;opacity:0.5;font-size:0.9em;';
+        bin.addEventListener('click', () => deleteMessageAt(hidx));
+        div.appendChild(bin);
     }
 
     function addBubble(kind, text, hidx) {
@@ -1518,20 +1632,13 @@
         const cls = kind === 'user' ? 'cc_user' : kind === 'assistant' || kind === 'ai' ? 'cc_ai' : kind === 'busy' ? 'cc_busy' : 'cc_note';
         div.className = 'cc_bubble ' + cls;
         div.innerHTML = esc(text);
-        if (kind === 'user' && Number.isInteger(hidx)) {
-            const pen = document.createElement('span');
-            pen.textContent = '\u270E';
-            pen.title = 'Edit this message and continue from here';
-            pen.style.cssText = 'margin-left:8px;cursor:pointer;opacity:0.6;font-size:0.95em;';
-            pen.addEventListener('click', () => startEditUserMessage(hidx));
-            div.appendChild(pen);
-        }
+        attachMsgIcons(div, kind, hidx);
         log.appendChild(div);
         log.scrollTop = log.scrollHeight;
         return div;
     }
 
-    function addAiBubble(rest, think) {
+    function addAiBubble(rest, think, hidx) {
         const log = el('cc_log');
         const div = document.createElement('div');
         div.className = 'cc_bubble cc_ai';
@@ -1541,6 +1648,7 @@
         }
         html += esc(stripBlocks(rest) || '(no text)');
         div.innerHTML = html;
+        attachMsgIcons(div, 'ai', hidx);
         log.appendChild(div);
         log.scrollTop = log.scrollHeight;
         return div;
@@ -1553,9 +1661,9 @@
         const hist = meta().history;
         for (let i = 0; i < hist.length; i++) {
             const h = hist[i];
-            if (h.role === 'assistant') addAiBubble(h.content, h.think);
+            if (h.role === 'assistant') addAiBubble(h.content, h.think, i);
             else if (h.role === 'user') addBubble('user', h.content, i);
-            else addBubble('note', h.content);
+            else addBubble('note', h.content, i);
         }
         updateSub();
     }
@@ -1586,7 +1694,9 @@
             const label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
             const card = document.createElement('div');
             card.className = 'cc_card';
-            const findShown = edit.find == null ? '(replace entire message)' : edit.find;
+            const findShown = edit.find == null
+                ? (isMem ? '(replace entire field: ' + (edit.path || '?') + ')' : '(replace entire message)')
+                : edit.find;
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b><span>' + esc(edit.reason || '') + '</span>' +
                 (edit.status === 'pending'
