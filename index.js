@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.8.9';
+    const VERSION = '1.9.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -180,12 +180,19 @@
         let m = md[MODULE];
         if (!m || !Array.isArray(m.sessions)) {
             const old = (m && Array.isArray(m.history)) ? m.history : [];
-            m = { sessions: [{ id: 1, name: 'Session 1', history: old }], activeId: 1 };
+            m = {
+                sessions: [{ id: 1, name: 'Session 1', history: old }],
+                activeId: 1,
+                director: (m && m.director) ? m.director : null,
+                ccHidden: (m && Array.isArray(m.ccHidden)) ? m.ccHidden : [],
+                directorEp: (m && Number.isFinite(m.directorEp)) ? m.directorEp : 0,
+            };
             md[MODULE] = m;
         }
         if (!m.sessions.length) m.sessions.push({ id: 1, name: 'Session 1', history: [] });
         if (!m.sessions.some(x => x.id === m.activeId)) m.activeId = m.sessions[0].id;
         if (!Array.isArray(m.ccHidden)) m.ccHidden = [];
+        if (!Number.isFinite(m.directorEp)) m.directorEp = (m.director && Number(m.director.episode)) || 0;
         return m;
     }
 
@@ -1364,6 +1371,23 @@
         }
     }
 
+    function peekCritique() {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata || {};
+        const cur = typeof md.cc_critique === 'string' ? md.cc_critique : '';
+        showViewer('\uD83D\uDCDD Editor critique (edit + Save; save empty to delete)', cur, (t) => {
+            const md2 = ctx().chatMetadata || ctx().chat_metadata;
+            if (!md2) return;
+            const txt = String(t || '').trim();
+            md2.cc_critique = txt;
+            saveMeta();
+            applyCritiqueInjection();
+            const note = txt ? '\uD83D\uDCDD Critique manually edited.' : '\uD83D\uDCDD Critique deleted.';
+            addBubble('note', note);
+            pushHistory('note', note);
+        });
+    }
+
     function directorAuthorPrompt(mode) {
         const intensity = settings.directorIntensity || 'standard';
         const anchors = String(settings.directorAnchors || '').trim();
@@ -1398,8 +1422,11 @@
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             const text = splitThinking(raw).rest.trim();
             if (!text) throw new Error('empty directive');
-            const ep = mode === 'next' ? ((prev?.episode || 0) + 1) : (prev?.episode || 1);
+            const ep = mode === 'next'
+                ? (Math.max(Number(prev?.episode) || 0, Number(metaRoot().directorEp) || 0) + 1)
+                : (Number(prev?.episode) || 1);
             metaRoot().director = { text, episode: ep, ts: Date.now() };
+            metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
             applyInjections();
             const note = '\uD83C\uDFAC Directive set (episode ' + ep + '). Content hidden \u2014 just keep playing.';
@@ -1447,6 +1474,7 @@
             if (!text) throw new Error('empty directive');
             const ep = prev?.episode || 1;
             metaRoot().director = { text, episode: ep, ts: Date.now() };
+            metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
             applyInjections();
             const note = '\uD83C\uDFAC Directive revised around your direction (episode ' + ep + '). Beats stay hidden \u2014 \uD83C\uDFAC Peek to view.';
@@ -1735,6 +1763,7 @@
             '    <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
             '    <button class="cc_btn" id="cc_dirpeek" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek</button>',
             '    <button class="cc_btn" id="cc_critique" title="Editor pass: generate/update standing craft notes for the storyteller">\uD83D\uDCDD Critique</button>',
+            '    <button class="cc_btn" id="cc_critpeek" title="View or hand-edit the critique">\uD83D\uDCDD Peek</button>',
             '    <button class="cc_btn" id="cc_undo" title="Undo last applied batch">Undo</button>',
             '    <button class="cc_btn" id="cc_memcheck" title="Show detected memory sources">Memory?</button>',
             '    <button class="cc_btn" id="cc_context" title="Show the full context the copilot receives">Context</button>',
@@ -1777,6 +1806,7 @@
         el('cc_dirstat').addEventListener('click', () => directorStatus());
         el('cc_dirpeek').addEventListener('click', () => peekDirective());
         el('cc_critique').addEventListener('click', () => generateCritique());
+        el('cc_critpeek').addEventListener('click', () => peekCritique());
         el('cc_sess').addEventListener('change', () => switchSession(el('cc_sess').value));
         el('cc_sessnew').addEventListener('click', () => newSession());
         el('cc_sessbr').addEventListener('click', () => branchSession());
