@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.9.1';
+    const VERSION = '1.9.3';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1333,6 +1333,41 @@
         applyCritiqueInjection();
     }
 
+    function critiqueItems(t) {
+        return String(t || '').split('\n')
+            .map(l => l.trim())
+            .filter(l => /^\d+[\.\)]\s/.test(l))
+            .map(l => l.replace(/^\d+[\.\)]\s*/, ''));
+    }
+
+    function itemSim(a, b) {
+        const wa = a.toLowerCase().split(/\s+/).filter(Boolean);
+        const wb = b.toLowerCase().split(/\s+/).filter(Boolean);
+        if (!wa.length || !wb.length) return 0;
+        const dist = levenshtein(wa, wb);
+        return 1 - dist / Math.max(wa.length, wb.length);
+    }
+
+    function critiqueDiff(oldText, newText) {
+        const oldItems = critiqueItems(oldText);
+        const newItems = critiqueItems(newText);
+        if (!oldItems.length) return newItems.length + ' item(s).';
+        const removed = [];
+        let kept = 0;
+        for (const o of oldItems) {
+            let best = 0;
+            for (const n of newItems) best = Math.max(best, itemSim(o, n));
+            if (best >= 0.55) kept++;
+            else removed.push(o);
+        }
+        const added = Math.max(0, newItems.length - kept);
+        let out = '+' + added + ' new, ' + kept + ' kept, \u2212' + removed.length + ' removed.';
+        if (removed.length) {
+            out += ' Removed: ' + removed.map(r => '\u201C' + r.slice(0, 80) + (r.length > 80 ? '\u2026' : '') + '\u201D').join(' | ');
+        }
+        return out;
+    }
+
     async function generateCritique() {
         if (running) return;
         running = true;
@@ -1346,6 +1381,7 @@
                 'You are a ruthless story editor reviewing a long-form roleplay. Produce STANDING NOTES for the storyteller AI: concrete, reusable craft corrections that fix systemic weaknesses.',
                 'Analyze for: claustrophobia (everything orbiting the MC), dropped characters or props (people who vanish mid-scene), missing ambient world life (background events, crowds, random encounters, off-screen agendas), repeated mistakes, contradictions with the world\'s own rules, and stale pacing.',
                 'Also mine any OOC/meta exchanges in the chat (corrections in (( )), [brackets], or marked OOC) for lessons the storyteller was already told.',
+                'Discipline: only add a correction you can tie to concrete evidence in the context. If the story has not meaningfully changed since [CURRENT NOTES], or no genuine new weakness exists, return the current notes unchanged apart from removing items the storyteller has demonstrably fixed. NEVER invent problems to fill space \u2014 an unchanged or shorter list is a good answer.',
                 'Write numbered standing corrections \u2014 as many as the story genuinely needs, no maximum. Each must be actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Optimize for perfection, immersion, engagement, and realism \u2014 while staying token-efficient: no padding, no repetition, no filler; every line must earn its place. Output ONLY the notes.',
             ].join('\n');
             const user = buildContextBlock() + (cur ? '\n\n[CURRENT NOTES]\n' + cur : '') + '\n\nWrite the standing notes now.';
@@ -1357,9 +1393,10 @@
             const text = splitThinking(raw).rest.trim();
             if (!text) throw new Error('empty critique');
             md.cc_critique = text;
+            undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur }] });
             saveMeta();
             applyCritiqueInjection();
-            const note = '\uD83D\uDCDD Critique updated (' + text.length + ' chars). It is visible \u2014 ask me to show it, edit it, or delete it anytime.';
+            const note = '\uD83D\uDCDD Critique updated: ' + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)';
             addBubble('note', note);
             pushHistory('note', note);
         } catch (err) {
