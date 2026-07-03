@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.2.0';
+    const VERSION = '1.3.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -87,6 +87,7 @@
         directorIntensity: 'standard',
         directorAnchors: '',
         directorDepth: 4,
+        directorPrompt: DEFAULT_DIRECTOR_PROMPT,
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
     };
@@ -975,6 +976,18 @@
     // Director: secret episode directive injected into the storyteller
     // ------------------------------------------------------------------
 
+    const DEFAULT_DIRECTOR_PROMPT = [
+        'You are an expert story director for a long-form roleplay. Write a SECRET director\'s note for the storyteller AI. The player must never see it.',
+        'Anchor everything in [STORY MEMORY] and the current scene: established characters, motives, and world rules must stay accurate. You MAY invent minor new elements the world would plausibly contain \u2014 background or minor characters, crowds and public reaction, institutional or systemic events (announcements, deadlines, inspections, ceremonies, news), rumors, weather, chance encounters \u2014 as texture and pressure. New elements must fit the setting\'s logic; never contradict canon and never invent or replace major named canon.',
+        'The note must contain:',
+        '1. EPISODE PREMISE \u2014 one television-episode-quality premise rising naturally from existing threads.',
+        '2. BEATS \u2014 3-5 escalation beats in order, each naming WHO or WHAT initiates and the pressure it puts on the player character. At least one beat must come from OUTSIDE the personal cast: the crowd/public, an institution or system, the environment, or chance.',
+        '3. NPC & WORLD INITIATIVE \u2014 antagonists, NPCs, and the world itself act first, true to their established methods; the setting should feel alive beyond the main cast.',
+        '4. LANDING \u2014 the natural end state of the episode and its consequence.',
+        'Calibration: intensity = INTENSITY_LEVEL. Match the story\'s existing tone and realism; escalate the way good TV does \u2014 earned, in-character, no tonal whiplash, no gratuitous extremes. Vary pressure sources between episodes (personal, social, systemic, environmental).',
+        'Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. Under 250 words. Output ONLY the director\'s note text, no preamble.',
+    ].join('\n');
+
     const DIRECTOR_KEY = 'cc_director';
 
     function applyDirectorInjection() {
@@ -993,27 +1006,18 @@
     function directorAuthorPrompt(mode) {
         const intensity = settings.directorIntensity || 'standard';
         const anchors = String(settings.directorAnchors || '').trim();
-        const lines = [
-            'You are an expert story director for a long-form roleplay. Write a SECRET director\'s note for the storyteller AI. The player must never see it.',
-            'Ground everything in [STORY MEMORY] and the current scene: use only established characters, motives, and world rules.',
-            'The note must contain:',
-            '1. EPISODE PREMISE \u2014 one television-episode-quality premise that rises naturally from existing threads.',
-            '2. BEATS \u2014 3-5 escalation beats in order, each naming WHO initiates and what pressure it puts on the player character.',
-            '3. NPC INITIATIVE \u2014 antagonists and NPCs act first, with agency and menace true to their established methods.',
-            '4. LANDING \u2014 the natural end state of the episode and its consequence.',
-            'Calibration: intensity = ' + intensity + '. Match the story\'s existing tone and realism; escalate the way good TV does \u2014 earned, in-character, no tonal whiplash, no gratuitous extremes.',
-        ];
+        let base = String(settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT).replace('INTENSITY_LEVEL', intensity);
+        const extra = [];
         if (anchors) {
-            lines.push('Pacing reference (RHYTHM and episode structure ONLY \u2014 never import their characters, names, plots, or lines): ' + anchors);
+            extra.push('Pacing reference (RHYTHM and episode structure ONLY \u2014 never import their characters, names, plots, or lines): ' + anchors);
         }
-        lines.push('Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. Under 250 words. Output ONLY the director\'s note text, no preamble.');
         if (mode === 'next') {
-            lines.push('A previous episode directive is provided; treat it as concluded and write the NEXT episode, carrying its consequences forward.');
+            extra.push('A previous episode directive is provided; treat it as concluded and write the NEXT episode, carrying its consequences forward. Vary the pressure mix compared to the previous episode.');
         }
         if (mode === 'edit') {
-            lines.push('The CURRENT directive and the player\'s direction instruction are provided. Rewrite the directive to incorporate the player\'s direction while preserving whatever still works. Keep the same episode. If no current directive is provided, write a fresh one built around the player\'s direction.');
+            extra.push('The CURRENT directive and the player\'s direction instruction are provided. Rewrite the directive to incorporate the player\'s direction while preserving whatever still works. Keep the same episode. If no current directive is provided, write a fresh one built around the player\'s direction.');
         }
-        return lines.join('\n');
+        return base + (extra.length ? '\n' + extra.join('\n') : '');
     }
 
     async function generateDirective(mode) {
@@ -1406,6 +1410,8 @@
             '</div>',
             '<label>Director style anchors (optional pacing references)</label>',
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
+            '<label>Director system prompt (INTENSITY_LEVEL is replaced automatically)</label>',
+            '<textarea id="cc_dir_prompt"></textarea>',
             '<label>Shortcut commands (one per line: #tag = prompt)</label>',
             '<textarea id="cc_shortcuts"></textarea>',
             '<label>System prompt (USER_EDIT_RULE is replaced automatically)</label>',
@@ -1413,6 +1419,7 @@
             '<div style="margin-top:6px; display:flex; gap:6px;">',
             '  <button class="cc_btn" id="cc_saveset">Save settings</button>',
             '  <button class="cc_btn" id="cc_resetprompt">Reset prompt</button>',
+            '  <button class="cc_btn" id="cc_dirreset">Reset director prompt</button>',
             '  <button class="cc_btn" id="cc_dumpsc">Raw memory data</button>',
             '</div>',
         ].join('\n');
@@ -1429,6 +1436,7 @@
         el('cc_dir_int').value = settings.directorIntensity || 'standard';
         el('cc_dir_depth').value = settings.directorDepth;
         el('cc_dir_anchors').value = settings.directorAnchors || '';
+        el('cc_dir_prompt').value = settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT;
         el('cc_shortcuts').value = settings.shortcuts;
         el('cc_sysprompt').value = settings.systemPrompt;
         refreshProfileSelect();
@@ -1447,6 +1455,7 @@
             settings.directorIntensity = el('cc_dir_int').value || 'standard';
             settings.directorDepth = Number(el('cc_dir_depth').value) || 4;
             settings.directorAnchors = el('cc_dir_anchors').value;
+            settings.directorPrompt = el('cc_dir_prompt').value || DEFAULT_DIRECTOR_PROMPT;
             settings.shortcuts = el('cc_shortcuts').value;
             applyDirectorInjection();
             settings.systemPrompt = el('cc_sysprompt').value || DEFAULT_SYSTEM_PROMPT;
@@ -1455,6 +1464,9 @@
         });
         el('cc_resetprompt').addEventListener('click', () => {
             el('cc_sysprompt').value = DEFAULT_SYSTEM_PROMPT;
+        });
+        el('cc_dirreset').addEventListener('click', () => {
+            el('cc_dir_prompt').value = DEFAULT_DIRECTOR_PROMPT;
         });
         el('cc_dumpsc').addEventListener('click', () => {
             const c = ctx();
