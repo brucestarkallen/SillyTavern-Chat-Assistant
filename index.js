@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '0.7.0';
+    const VERSION = '0.8.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -54,10 +54,20 @@
         '5. Outside those blocks, talk to the user naturally. Keep repair talk brief and concrete; for brainstorming and story discussion you may write more. Never paste whole chat messages back at them.',
     ].join('\n');
 
+    const MEMEDIT_RULES = [
+        'Memory editing:',
+        '- [STORY MEMORY] comes from the user\'s memory extension and is directly editable. To correct it (notes, plot-essential, snippet text), include one block:',
+        '<memedits>',
+        '[{"find": "exact text copied character-for-character from [STORY MEMORY]", "replace": "corrected text", "reason": "short why"}]',
+        '</memedits>',
+        '- "find" must be verbatim from [STORY MEMORY] and long enough to be unique. Keep corrections minimal and in the same style.',
+        '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
+    ].join('\n');
+
     const AUDIT_PROMPT = 'Audit the whole chat against [STORY MEMORY]. Look for continuity and logic errors: wrong locations, wrong character knowledge (information quarantine breaks), timeline contradictions, dropped or duplicated plot state. Fetch full messages if you need them, then list what you found and propose fixes in an <edits> block.';
 
     const DEFAULT_SHORTCUTS = [
-        '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then report two lists: (1) events, facts, or state changes in the recent chat that are MISSING from the Summaryception snippets/audit/notes, and (2) memory entries that are now stale or contradicted by the chat. For each item, write the exact new or corrected text I should put into Summaryception. Do NOT propose <edits> to chat messages unless I explicitly ask.',
+        '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then find (1) events, facts, or state changes MISSING from the memory and (2) memory entries that are stale or contradicted by the chat. Propose every correction in a single <memedits> block with "find" copied verbatim from [STORY MEMORY]. Do NOT propose <edits> to chat messages unless I explicitly ask.',
         '#f = Check the chat against [STORY MEMORY] and fix every continuity error you find with a single <edits> block.',
         '#i = Brainstorm what could happen next. Give 3-5 distinct directions for the upcoming scene(s), each consistent with [STORY MEMORY] and the current situation: a one-line hook plus what it would develop. Do not write the scene itself and do not propose <edits>.',
     ].join('\n');
@@ -238,6 +248,25 @@
     // Context assembly: memory, index, full messages
     // ------------------------------------------------------------------
 
+    function flattenStrings(node, path) {
+        const out = [];
+        const walk = (n, p2) => {
+            if (typeof n === 'string') {
+                if (n.trim().length >= 30) out.push('[' + p2 + ']\n' + n.trim());
+                return;
+            }
+            if (Array.isArray(n)) { n.forEach((v2, i) => walk(v2, p2 + '[' + i + ']')); return; }
+            if (n && typeof n === 'object') {
+                const entries = Object.entries(n);
+                // Direct text fields first (e.g. notepad), nested structures after (e.g. layers).
+                for (const [k, v2] of entries) { if (typeof v2 === 'string') walk(v2, p2 + '.' + k); }
+                for (const [k, v2] of entries) { if (typeof v2 !== 'string') walk(v2, p2 + '.' + k); }
+            }
+        };
+        walk(node, path);
+        return out.join('\n\n');
+    }
+
     function gatherMemory() {
         const c = ctx();
         const parts = [];
@@ -247,43 +276,44 @@
 
         // 1) Live extension prompt injections (this is exactly what the main
         //    model sees from Summaryception: snippets, audit, notes, etc.)
-        const injKeys = new Set();
-        try {
-            const eps = c.extensionPrompts || {};
-            for (const [key, p] of Object.entries(eps)) {
-                const val = p && typeof p.value === 'string' ? p.value.trim() : '';
-                if (val && re.test(key)) {
-                    parts.push('--- injection: ' + key + ' ---\n' + val);
-                    injKeys.add(key.toLowerCase());
-                }
-            }
-        } catch (e) { console.warn(LOG, 'extensionPrompts read failed', e); }
-
-        // 2) Matching keys in chat metadata (fork-specific storage).
+        const mdKeys = new Set();
+        // 1) Matching keys in chat metadata: the editable source of truth.
         try {
             const md = c.chatMetadata || c.chat_metadata || {};
             for (const [key, v] of Object.entries(md)) {
                 if (key === MODULE || !re.test(key)) continue;
-                if (injKeys.has(key.toLowerCase())) continue; // same content already included via injection
                 let text = '';
-                if (typeof v === 'string') text = v;
-                else { try { text = JSON.stringify(v); } catch (e) { text = ''; } }
-                text = String(text || '').trim();
-                if (text) parts.push('--- metadata: ' + key + ' ---\n' + text.slice(0, 8000));
+                if (typeof v === 'string') text = v.trim();
+                else if (v && typeof v === 'object') text = flattenStrings(v, key).trim();
+                if (text) {
+                    parts.push('--- memory: ' + key + ' ---\n' + text);
+                    mdKeys.add(key.toLowerCase());
+                }
             }
         } catch (e) { console.warn(LOG, 'chatMetadata read failed', e); }
+
+        // 2) Live injections, unless the same-named metadata already covered them.
+        try {
+            const eps = c.extensionPrompts || {};
+            for (const [key, p] of Object.entries(eps)) {
+                const val = p && typeof p.value === 'string' ? p.value.trim() : '';
+                if (!val || !re.test(key)) continue;
+                if (mdKeys.has(key.toLowerCase())) continue; // metadata version is the editable truth
+                parts.push('--- injection: ' + key + ' ---\n' + val);
+            }
+        } catch (e) { console.warn(LOG, 'extensionPrompts read failed', e); }
 
         // 3) Author's Note (some setups keep "notes" there, e.g. Summaryception forks).
         if (settings.includeAuthorsNote) {
             try {
                 const md = c.chatMetadata || c.chat_metadata || {};
                 const an = typeof md.note_prompt === 'string' ? md.note_prompt.trim() : '';
-                if (an) parts.push("--- Author's Note (chat) ---\n" + an.slice(0, 4000));
+                if (an) parts.push("--- Author's Note (chat) ---\n" + an);
             } catch (e) { /* ignore */ }
             try {
                 const fp = c.extensionPrompts?.['2_floating_prompt'];
                 const val = fp && typeof fp.value === 'string' ? fp.value.trim() : '';
-                if (val) parts.push("--- Author's Note (injected) ---\n" + val.slice(0, 4000));
+                if (val) parts.push("--- Author's Note (injected) ---\n" + val);
             } catch (e) { /* ignore */ }
         }
 
@@ -338,7 +368,7 @@
         const rule = settings.allowUserEdits
             ? 'You may edit user-authored messages when the user asks for it.'
             : 'Never propose edits to user-authored messages; they are read-only.';
-        return String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule);
+        return String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + MEMEDIT_RULES;
     }
 
     // ------------------------------------------------------------------
@@ -449,6 +479,7 @@
                 const id = Number(e.id);
                 if (!Number.isInteger(id) || id < 0) continue;
                 edits.push({
+                    kind: 'chat',
                     id,
                     find: (typeof e.find === 'string' && e.find.length) ? e.find : null,
                     replace: String(e.replace ?? ''),
@@ -462,10 +493,33 @@
         }
     }
 
+    function parseMemEdits(text) {
+        const m = String(text || '').match(/<memedits>\s*([\s\S]*?)\s*<\/memedits>/i);
+        if (!m) return { edits: [] };
+        let raw = m[1].trim()
+            .replace(/^```(?:json)?\s*/i, '')
+            .replace(/```\s*$/, '')
+            .trim();
+        try {
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return { edits: [], error: 'memedits block is not a JSON array' };
+            const edits = [];
+            for (const e of arr) {
+                if (!e || typeof e !== 'object') continue;
+                if (typeof e.find !== 'string' || !e.find.length) continue;
+                edits.push({ kind: 'mem', find: e.find, replace: String(e.replace ?? ''), reason: String(e.reason ?? ''), status: 'pending' });
+            }
+            return { edits };
+        } catch (err) {
+            return { edits: [], error: 'could not parse memedits JSON: ' + err.message };
+        }
+    }
+
     function stripBlocks(text) {
         return String(text || '')
             .replace(/<fetch>[\s\S]*?<\/fetch>/gi, '')
             .replace(/<edits>[\s\S]*?<\/edits>/gi, '[proposed edits below]')
+            .replace(/<memedits>[\s\S]*?<\/memedits>/gi, '[proposed memory edits below]')
             .trim();
     }
 
@@ -618,22 +672,96 @@
         return { ok: true, before, fuzzyNote };
     }
 
-    async function applyEdits(list) {
-        const applied = [];
-        for (const edit of list) {
-            if (edit.status !== 'pending') continue;
-            const res = applyOne(edit);
-            if (res.ok) {
-                edit.status = 'applied' + (res.fuzzyNote || '');
-                applied.push({ id: edit.id, before: res.before });
-            } else {
-                edit.status = 'failed: ' + res.reason;
+    function walkReplace(node, find, replace, path) {
+        if (Array.isArray(node)) {
+            for (let i = 0; i < node.length; i++) {
+                const v = node[i];
+                if (typeof v === 'string') {
+                    const loc = locate(v, find);
+                    if (loc) { node[i] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '[' + i + ']', fuzzy: !!loc.fuzzy }; }
+                } else if (v && typeof v === 'object') {
+                    const r = walkReplace(v, find, replace, path + '[' + i + ']');
+                    if (r) return r;
+                }
+            }
+            return null;
+        }
+        for (const [k, v] of Object.entries(node)) {
+            if (typeof v === 'string') {
+                const loc = locate(v, find);
+                if (loc) { node[k] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '.' + k, fuzzy: !!loc.fuzzy }; }
+            } else if (v && typeof v === 'object') {
+                const r = walkReplace(v, find, replace, path + '.' + k);
+                if (r) return r;
             }
         }
-        if (applied.length) {
-            undoStack.push({ label: applied.map(a => '#' + a.id).join(', '), items: applied });
-            await commitChanges(applied.map(a => a.id));
-            const note = 'Applied ' + applied.length + ' edit(s) to ' + applied.map(a => '#' + a.id).join(', ') + '.';
+        return null;
+    }
+
+    function applyMemOne(edit, keyBackups) {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata;
+        if (!md) return { ok: false, reason: 'no chat metadata' };
+        let re;
+        try { re = new RegExp(settings.memoryKeyPattern, 'i'); }
+        catch (e) { re = /summar|ception|memory/i; }
+        for (const [key, val] of Object.entries(md)) {
+            if (key === MODULE || !re.test(key) || val == null) continue;
+            if (typeof val === 'string') {
+                const loc = locate(val, edit.find);
+                if (loc) {
+                    if (!keyBackups.has(key)) keyBackups.set(key, val);
+                    md[key] = val.slice(0, loc.start) + String(edit.replace ?? '') + val.slice(loc.end);
+                    return { ok: true, path: key, fuzzy: !!loc.fuzzy };
+                }
+                continue;
+            }
+            if (typeof val === 'object') {
+                const backup = JSON.parse(JSON.stringify(val));
+                const hit = walkReplace(val, edit.find, String(edit.replace ?? ''), key);
+                if (hit) {
+                    if (!keyBackups.has(key)) keyBackups.set(key, backup);
+                    return { ok: true, path: hit.path, fuzzy: hit.fuzzy };
+                }
+            }
+        }
+        return { ok: false, reason: '"find" text not located in memory' };
+    }
+
+    async function applyEdits(list) {
+        const chatApplied = [];
+        const memPaths = [];
+        const keyBackups = new Map();
+        for (const edit of list) {
+            if (edit.status !== 'pending') continue;
+            if (edit.kind === 'mem') {
+                const res = applyMemOne(edit, keyBackups);
+                if (res.ok) {
+                    edit.status = 'applied \u2192 ' + res.path + (res.fuzzy ? ' (fuzzy)' : '');
+                    memPaths.push(res.path);
+                } else {
+                    edit.status = 'failed: ' + res.reason;
+                }
+            } else {
+                const res = applyOne(edit);
+                if (res.ok) {
+                    edit.status = 'applied' + (res.fuzzyNote || '');
+                    chatApplied.push({ kind: 'chat', id: edit.id, before: res.before });
+                } else {
+                    edit.status = 'failed: ' + res.reason;
+                }
+            }
+        }
+        const items = [...chatApplied];
+        for (const [key, before] of keyBackups.entries()) items.push({ kind: 'mem', key, before });
+        if (items.length) {
+            const labelParts = [];
+            if (chatApplied.length) labelParts.push(chatApplied.map(a => '#' + a.id).join(', '));
+            if (memPaths.length) labelParts.push('memory: ' + memPaths.join(', '));
+            undoStack.push({ label: labelParts.join(' + '), items });
+            if (chatApplied.length) await commitChanges(chatApplied.map(a => a.id));
+            if (memPaths.length) saveMeta();
+            const note = 'Applied ' + (chatApplied.length + memPaths.length) + ' edit(s): ' + labelParts.join(' + ') + '.' + (memPaths.length ? ' Memory updated \u2014 Summaryception uses it from the next generation.' : '');
             addBubble('note', note);
             pushHistory('note', note);
             toast(note, 'success');
@@ -646,14 +774,21 @@
         if (!batch) { toast('Nothing to undo.', 'warning'); return; }
         const c = ctx();
         const changed = [];
+        let memRestored = false;
         for (const item of batch.items) {
+            if (item.kind === 'mem') {
+                const md = c.chatMetadata || c.chat_metadata;
+                if (md) { md[item.key] = item.before; memRestored = true; }
+                continue;
+            }
             const msg = c.chat?.[item.id];
             if (!msg) continue;
             msg.mes = item.before;
             refreshMessage(item.id);
             changed.push(item.id);
         }
-        await commitChanges(changed);
+        if (changed.length) await commitChanges(changed);
+        if (memRestored) saveMeta();
         const note = 'Undid edits on ' + batch.label + '.';
         addBubble('note', note);
         pushHistory('note', note);
@@ -760,11 +895,12 @@
             addAiBubble(reply, think);
 
             const parsed = parseEdits(reply);
-            if (parsed.error) {
-                addBubble('note', 'Edit block error: ' + parsed.error + ' — ask the copilot to resend valid JSON.');
-            }
-            if (parsed.edits.length) {
-                pendingEdits = parsed.edits;
+            const parsedMem = parseMemEdits(reply);
+            if (parsed.error) addBubble('note', 'Edit block error: ' + parsed.error + ' — ask the copilot to resend valid JSON.');
+            if (parsedMem.error) addBubble('note', 'Memory edit block error: ' + parsedMem.error + ' — ask the copilot to resend valid JSON.');
+            const allEdits = [...parsed.edits, ...parsedMem.edits];
+            if (allEdits.length) {
+                pendingEdits = allEdits;
                 renderEditCards();
             }
         } catch (err) {
@@ -903,14 +1039,20 @@
         const matched = [];
         const ignored = [];
         const dupes = [];
-        const injMatched = new Set();
+        const mdMatched = new Set();
+        try {
+            const md0 = c.chatMetadata || c.chat_metadata || {};
+            for (const key of Object.keys(md0)) {
+                if (key !== MODULE && re.test(key)) mdMatched.add(key.toLowerCase());
+            }
+        } catch (e) { /* ignore */ }
         try {
             for (const [key, p] of Object.entries(c.extensionPrompts || {})) {
                 const val = p && typeof p.value === 'string' ? p.value.trim() : '';
                 if (!val || key === '2_floating_prompt') continue;
                 if (re.test(key)) {
-                    matched.push('injection: ' + key + '  (' + val.length + ' chars)');
-                    injMatched.add(key.toLowerCase());
+                    if (mdMatched.has(key.toLowerCase())) dupes.push('injection: ' + key + '  (' + val.length + ' chars)');
+                    else matched.push('injection: ' + key + '  (' + val.length + ' chars)');
                 } else {
                     ignored.push('injection: ' + key + '  (' + val.length + ' chars)');
                 }
@@ -925,8 +1067,7 @@
                 text = String(text || '').trim();
                 if (!text || text === '{}' || text === '[]') continue;
                 if (re.test(key)) {
-                    if (injMatched.has(key.toLowerCase())) dupes.push('metadata: ' + key + '  (' + text.length + ' chars)');
-                    else matched.push('metadata: ' + key + '  (' + text.length + ' chars)');
+                    matched.push('metadata: ' + key + '  (' + text.length + ' chars) \u2014 editable source');
                 } else {
                     ignored.push('metadata: ' + key + '  (' + text.length + ' chars)');
                 }
@@ -939,7 +1080,7 @@
         if (settings.includeAuthorsNote) lines.push("  - Author's Note (included when set)");
         if (dupes.length) {
             lines.push('');
-            lines.push('SKIPPED (same name as a matched injection = duplicate content, saves tokens):');
+            lines.push('SKIPPED (injection duplicating the editable metadata source, saves tokens):');
             lines.push(dupes.map(s2 => '  - ' + s2).join('\n'));
         }
         lines.push('');
@@ -1197,13 +1338,15 @@
         frag.appendChild(head);
 
         pendingEdits.forEach((edit, idx) => {
-            const msg = chat[edit.id];
-            const who = msg ? (msg.is_user ? 'USER' : (msg.name || 'AI')) : '?';
+            const isMem = edit.kind === 'mem';
+            const msg = isMem ? null : chat[edit.id];
+            const who = isMem ? '' : (msg ? (msg.is_user ? 'USER' : (msg.name || 'AI')) : '?');
+            const label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
             const card = document.createElement('div');
             card.className = 'cc_card';
             const findShown = edit.find == null ? '(replace entire message)' : edit.find;
             card.innerHTML =
-                '<div class="cc_card_top"><b>#' + edit.id + ' ' + esc(who) + '</b><span>' + esc(edit.reason || '') + '</span>' +
+                '<div class="cc_card_top"><b>' + label + '</b><span>' + esc(edit.reason || '') + '</span>' +
                 (edit.status === 'pending'
                     ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button><button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +
