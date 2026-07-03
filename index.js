@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.6.0';
+    const VERSION = '1.8.2';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -62,7 +62,15 @@
         '</memedits>',
         '- "find" must be verbatim from [STORY MEMORY] and long enough to be unique. Keep corrections minimal and in the same style.',
         '- To replace an ENTIRE memory field, use {"path": "summaryception.notepad", "replace": "new full text", "reason": "..."} with the exact path shown in [STORY MEMORY] section headers. Adding "find" alongside "path" replaces only within that field.',
+        '- The Author\'s Note is writable at path "note_prompt" (created if absent). The visible editor-critique notes are writable at path "cc_critique"; full replace with "" deletes them.',
         '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
+    ].join('\n');
+
+    const CHAT_EDIT_EXTRAS = [
+        'Additional chat-edit ability:',
+        '- To HIDE a message from the AI context without deleting it (e.g. OOC/meta exchanges), use {"id": 12, "hide": true, "reason": "..."} inside <edits>. Use {"id": 12, "hide": false} to unhide. Hiding works on user messages too; the text stays visible in the log but leaves the AI context.',
+        '- The [MESSAGE INDEX] tags hidden messages "(hidden)" and memory-ghosted ones "(ghosted by memory)". You may unhide "(hidden)" messages when asked; NEVER unhide "(ghosted by memory)" ones \u2014 their content lives in the memory snippets.',
+        '- Messages you hid are remembered in a ledger even if another extension later makes them visible again (the index will note this). If the user asks to "re-hide my OOC", emit hide edits for every id in that note.',
     ].join('\n');
 
     const AUDIT_PROMPT = 'Audit the whole chat against [STORY MEMORY]. Look for continuity and logic errors: wrong locations, wrong character knowledge (information quarantine breaks), timeline contradictions, dropped or duplicated plot state. Fetch full messages if you need them, then list what you found and propose fixes in an <edits> block.';
@@ -70,6 +78,7 @@
     const DEFAULT_SHORTCUTS = [
         '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then find (1) events, facts, or state changes MISSING from the memory and (2) memory entries that are stale or contradicted by the chat. Propose every correction in a single <memedits> block with "find" copied verbatim from [STORY MEMORY]. Do NOT propose <edits> to chat messages unless I explicitly ask.',
         '#f = Check the chat against [STORY MEMORY] and fix every continuity error you find with a single <edits> block.',
+        '#o = Scan the chat for OOC/meta exchanges (out-of-character notes, corrections, discussions in (( )), [brackets], or marked OOC). Use <fetch> as needed. For each lesson found: (1) propose <edits> fixing any story text it corrected, (2) propose <memedits> persisting the lesson into the notepad, Author\'s Note (path note_prompt), or editor notes (path cc_critique), and (3) propose hiding the pure-OOC messages from AI context with {"id": n, "hide": true} entries. Nothing is deleted \u2014 hidden text stays in the log.',
         '#i = Brainstorm what could happen next. Give 3-5 distinct directions for the upcoming scene(s), each consistent with [STORY MEMORY] and the current situation: a one-line hook plus what it would develop. Do not write the scene itself and do not propose <edits>.',
     ].join('\n');
 
@@ -102,6 +111,8 @@
         directorAnchors: '',
         directorDepth: 4,
         directorPrompt: DEFAULT_DIRECTOR_PROMPT,
+        critiqueDepth: 8,
+        autoRehide: true,
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
     };
@@ -170,6 +181,7 @@
         }
         if (!m.sessions.length) m.sessions.push({ id: 1, name: 'Session 1', history: [] });
         if (!m.sessions.some(x => x.id === m.activeId)) m.activeId = m.sessions[0].id;
+        if (!Array.isArray(m.ccHidden)) m.ccHidden = [];
         return m;
     }
 
@@ -361,7 +373,7 @@
             try {
                 const md = c.chatMetadata || c.chat_metadata || {};
                 const an = typeof md.note_prompt === 'string' ? md.note_prompt.trim() : '';
-                if (an) parts.push("--- Author's Note (chat) ---\n" + an);
+                if (an) parts.push("--- Author's Note (chat, writable at path note_prompt) ---\n" + an);
             } catch (e) { /* ignore */ }
             try {
                 const fp = c.extensionPrompts?.['2_floating_prompt'];
@@ -370,19 +382,46 @@
             } catch (e) { /* ignore */ }
         }
 
+        try {
+            const md3 = c.chatMetadata || c.chat_metadata || {};
+            const crit = typeof md3.cc_critique === 'string' ? md3.cc_critique.trim() : '';
+            if (crit) parts.push('--- editor notes (writable at path cc_critique) ---\n' + crit);
+        } catch (e) { /* ignore */ }
+
         return parts.length ? parts.join('\n\n') : '(no memory extension data detected — pattern: ' + settings.memoryKeyPattern + ')';
+    }
+
+    function ghostedSet() {
+        try {
+            const md = ctx().chatMetadata || ctx().chat_metadata || {};
+            const g = md.summaryception?.ghostedIndices;
+            return new Set(Array.isArray(g) ? g.map(Number) : []);
+        } catch (e) { return new Set(); }
     }
 
     function buildIndex() {
         const chat = ctx().chat || [];
+        const ghosts = ghostedSet();
+        const led = new Set((metaRoot().ccHidden || []).map(Number));
         const lines = [];
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
             if (!m) continue;
-            if (m.is_system && !settings.includeHidden) continue;
             const who = m.is_user ? 'USER' : (m.name || 'AI');
-            const flag = m.is_system ? ' (hidden)' : '';
-            lines.push('#' + i + ' [' + who + ']' + flag + ': ' + oneLine(m.mes).slice(0, 150));
+            if (m.is_system) {
+                const tag = led.has(i) ? '(hidden)' : (ghosts.has(i) ? '(ghosted by memory)' : '(hidden)');
+                if (settings.includeHidden) {
+                    lines.push('#' + i + ' [' + who + '] ' + tag + ': ' + oneLine(m.mes).slice(0, 150));
+                } else {
+                    lines.push('#' + i + ' [' + who + '] ' + tag);
+                }
+                continue;
+            }
+            lines.push('#' + i + ' [' + who + ']: ' + oneLine(m.mes).slice(0, 150));
+        }
+        const restored = [...led].filter(i2 => chat[i2] && !chat[i2].is_system);
+        if (restored.length) {
+            lines.push('NOTE: previously pilot-hidden but now visible again (another extension may have unhidden them): #' + restored.join(', #'));
         }
         return lines.join('\n') || '(chat is empty)';
     }
@@ -421,7 +460,7 @@
         const rule = settings.allowUserEdits
             ? 'You may edit user-authored messages when the user asks for it.'
             : 'Never propose edits to user-authored messages; they are read-only.';
-        return String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + MEMEDIT_RULES;
+        return String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + CHAT_EDIT_EXTRAS + '\n\n' + MEMEDIT_RULES;
     }
 
     // ------------------------------------------------------------------
@@ -549,6 +588,7 @@
                 edits.push({
                     kind: 'chat',
                     id,
+                    hide: (typeof e.hide === 'boolean') ? e.hide : null,
                     find: (typeof e.find === 'string' && e.find.length) ? e.find : null,
                     replace: String(e.replace ?? ''),
                     reason: String(e.reason ?? ''),
@@ -716,9 +756,25 @@
         const i = Number(edit.id);
         const msg = c.chat?.[i];
         if (!msg) return { ok: false, reason: 'no message #' + i };
+        if (edit.hide !== null && edit.hide !== undefined) {
+            const beforeSys = !!msg.is_system;
+            if (beforeSys === !!edit.hide) return { ok: false, reason: edit.hide ? 'already hidden' : 'already visible' };
+            if (!edit.hide && ghostedSet().has(i)) {
+                return { ok: false, reason: 'ghosted by Summaryception \u2014 restore it via Summaryception instead' };
+            }
+            msg.is_system = !!edit.hide;
+            const led = metaRoot().ccHidden;
+            const pos = led.indexOf(i);
+            if (edit.hide && pos < 0) led.push(i);
+            if (!edit.hide && pos >= 0) led.splice(pos, 1);
+            saveMeta();
+            refreshMessage(i);
+            return { ok: true, before: String(msg.mes || ''), beforeSys };
+        }
         if (msg.is_user && !settings.allowUserEdits) {
             return { ok: false, reason: 'user message (locked in settings)' };
         }
+        const beforeSys = !!msg.is_system;
         const before = String(msg.mes || '');
         let next;
         let fuzzyNote = '';
@@ -739,7 +795,7 @@
         while (msg.extra.cc_backups.length > 3) msg.extra.cc_backups.shift();
 
         refreshMessage(i);
-        return { ok: true, before, fuzzyNote };
+        return { ok: true, before, beforeSys, fuzzyNote };
     }
 
     function walkReplace(node, find, replace, path) {
@@ -779,8 +835,13 @@
             const tokens = String(edit.path).match(/[^.\[\]]+/g) || [];
             if (!tokens.length) return { ok: false, reason: 'bad path' };
             const rootKey = tokens[0];
-            if (rootKey === MODULE || !re.test(rootKey) || md[rootKey] == null) {
+            const extraOk = rootKey === 'note_prompt' || rootKey === 'cc_critique';
+            if (rootKey === MODULE || (!re.test(rootKey) && !extraOk)) {
                 return { ok: false, reason: 'path not in memory scope' };
+            }
+            if (md[rootKey] == null) {
+                if (extraOk && tokens.length === 1) md[rootKey] = '';
+                else return { ok: false, reason: 'path not found' };
             }
             let parent = md;
             let key = rootKey;
@@ -824,6 +885,16 @@
                 }
             }
         }
+        for (const exKey of ['note_prompt', 'cc_critique']) {
+            const exVal = md[exKey];
+            if (typeof exVal !== 'string' || !exVal) continue;
+            const exLoc = locate(exVal, edit.find);
+            if (exLoc) {
+                if (!keyBackups.has(exKey)) keyBackups.set(exKey, exVal);
+                md[exKey] = exVal.slice(0, exLoc.start) + String(edit.replace ?? '') + exVal.slice(exLoc.end);
+                return { ok: true, path: exKey, fuzzy: !!exLoc.fuzzy };
+            }
+        }
         return { ok: false, reason: '"find" text not located in memory' };
     }
 
@@ -845,7 +916,7 @@
                 const res = applyOne(edit);
                 if (res.ok) {
                     edit.status = 'applied' + (res.fuzzyNote || '');
-                    chatApplied.push({ kind: 'chat', id: edit.id, before: res.before });
+                    chatApplied.push({ kind: 'chat', id: edit.id, before: res.before, beforeSys: res.beforeSys });
                 } else {
                     edit.status = 'failed: ' + res.reason;
                 }
@@ -859,7 +930,7 @@
             if (memPaths.length) labelParts.push('memory: ' + memPaths.join(', '));
             undoStack.push({ label: labelParts.join(' + '), items });
             if (chatApplied.length) await commitChanges(chatApplied.map(a => a.id));
-            if (memPaths.length) saveMeta();
+            if (memPaths.length) { saveMeta(); applyCritiqueInjection(); }
             const note = 'Applied ' + (chatApplied.length + memPaths.length) + ' edit(s): ' + labelParts.join(' + ') + '.' + (memPaths.length ? ' Memory updated \u2014 Summaryception uses it from the next generation.' : '');
             addBubble('note', note);
             pushHistory('note', note);
@@ -883,11 +954,18 @@
             const msg = c.chat?.[item.id];
             if (!msg) continue;
             msg.mes = item.before;
+            if (typeof item.beforeSys === 'boolean') {
+                msg.is_system = item.beforeSys;
+                const led = metaRoot().ccHidden;
+                const pos = led.indexOf(item.id);
+                if (item.beforeSys && pos < 0) led.push(item.id);
+                if (!item.beforeSys && pos >= 0) led.splice(pos, 1);
+            }
             refreshMessage(item.id);
             changed.push(item.id);
         }
         if (changed.length) await commitChanges(changed);
-        if (memRestored) saveMeta();
+        if (memRestored) { saveMeta(); applyCritiqueInjection(); }
         const note = 'Undid edits on ' + batch.label + '.';
         addBubble('note', note);
         pushHistory('note', note);
@@ -1163,6 +1241,63 @@
         } catch (e) { console.warn(LOG, 'director injection failed', e); }
     }
 
+    function applyCritiqueInjection() {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata || {};
+        const text = typeof md.cc_critique === 'string' ? md.cc_critique.trim() : '';
+        const depth = Number(settings?.critiqueDepth) || 8;
+        const role = c.extension_prompt_roles?.SYSTEM ?? 0;
+        try {
+            const value = text
+                ? "[Editor's Standing Notes \u2014 craft corrections the storyteller must keep applying:]\n" + text
+                : '';
+            c.setExtensionPrompt('cc_critique_inject', value, 1, depth, false, role);
+        } catch (e) { console.warn(LOG, 'critique injection failed', e); }
+    }
+
+    function applyInjections() {
+        applyDirectorInjection();
+        applyCritiqueInjection();
+    }
+
+    async function generateCritique() {
+        if (running) return;
+        running = true;
+        setBusy(true);
+        const busyNote = addBubble('busy', 'the editor is reviewing\u2026');
+        try {
+            const c = ctx();
+            const md = c.chatMetadata || c.chat_metadata || {};
+            const cur = typeof md.cc_critique === 'string' ? md.cc_critique : '';
+            const sys = [
+                'You are a ruthless story editor reviewing a long-form roleplay. Produce STANDING NOTES for the storyteller AI: concrete, reusable craft corrections that fix systemic weaknesses.',
+                'Analyze for: claustrophobia (everything orbiting the MC), dropped characters or props (people who vanish mid-scene), missing ambient world life (background events, crowds, random encounters, off-screen agendas), repeated mistakes, contradictions with the world\'s own rules, and stale pacing.',
+                'Also mine any OOC/meta exchanges in the chat (corrections in (( )), [brackets], or marked OOC) for lessons the storyteller was already told.',
+                'Write 5-10 numbered standing corrections, each actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Under 220 words. Output ONLY the notes.',
+            ].join('\n');
+            const user = buildContextBlock() + (cur ? '\n\n[CURRENT NOTES]\n' + cur : '') + '\n\nWrite the standing notes now.';
+            const raw = await callLLM([
+                { role: 'system', content: sys },
+                { role: 'user', content: user },
+            ]);
+            if (stopRequested) { addBubble('note', 'Stopped \u2014 critique unchanged.'); return; }
+            const text = splitThinking(raw).rest.trim();
+            if (!text) throw new Error('empty critique');
+            md.cc_critique = text;
+            saveMeta();
+            applyCritiqueInjection();
+            const note = '\uD83D\uDCDD Critique updated (' + text.length + ' chars). It is visible \u2014 ask me to show it, edit it, or delete it anytime.';
+            addBubble('note', note);
+            pushHistory('note', note);
+        } catch (err) {
+            addBubble('note', 'Critique error: ' + (err?.message || err));
+        } finally {
+            busyNote.remove();
+            running = false;
+            setBusy(false);
+        }
+    }
+
     function directorAuthorPrompt(mode) {
         const intensity = settings.directorIntensity || 'standard';
         const anchors = String(settings.directorAnchors || '').trim();
@@ -1200,7 +1335,7 @@
             const ep = mode === 'next' ? ((prev?.episode || 0) + 1) : (prev?.episode || 1);
             metaRoot().director = { text, episode: ep, ts: Date.now() };
             saveMeta();
-            applyDirectorInjection();
+            applyInjections();
             const note = '\uD83C\uDFAC Directive set (episode ' + ep + '). Content hidden \u2014 just keep playing.';
             addBubble('note', note);
             pushHistory('note', note);
@@ -1219,7 +1354,7 @@
         if (!confirm('Remove the secret directive?')) return;
         metaRoot().director = null;
         saveMeta();
-        applyDirectorInjection();
+        applyInjections();
         const note = '\uD83C\uDFAC Directive cleared.';
         addBubble('note', note);
         pushHistory('note', note);
@@ -1247,7 +1382,7 @@
             const ep = prev?.episode || 1;
             metaRoot().director = { text, episode: ep, ts: Date.now() };
             saveMeta();
-            applyDirectorInjection();
+            applyInjections();
             const note = '\uD83C\uDFAC Directive revised around your direction (episode ' + ep + '). Beats stay hidden \u2014 \uD83C\uDFAC Peek to view.';
             addBubble('note', note);
             pushHistory('note', note);
@@ -1301,7 +1436,19 @@
         const d = metaRoot().director;
         if (!d) { toast('No directive active.', 'warning'); return; }
         if (!confirm('Reveal the secret directive for episode ' + d.episode + '? This spoils the surprise.')) return;
-        showViewer('\uD83C\uDFAC Episode ' + d.episode + ' directive (spoiler)', d.text);
+        showViewer('\uD83C\uDFAC Episode ' + d.episode + ' directive (edit + Save)', d.text, (t) => {
+            t = String(t || '').trim();
+            const dd = metaRoot().director;
+            if (!dd) return;
+            if (!t) { toast('Directive left unchanged (empty text).', 'warning'); return; }
+            dd.text = t;
+            dd.ts = Date.now();
+            saveMeta();
+            applyInjections();
+            const note = '\uD83C\uDFAC Directive manually edited.';
+            addBubble('note', note);
+            pushHistory('note', note);
+        });
     }
 
     // ------------------------------------------------------------------
@@ -1324,7 +1471,7 @@
         } catch (e) { return false; }
     }
 
-    function showViewer(title, text) {
+    function showViewer(title, text, onSave) {
         let backdrop = el('cc_viewer');
         let box = el('cc_viewer_win');
         if (!box) {
@@ -1358,11 +1505,23 @@
             pre.id = 'cc_viewer_pre';
             pre.style.cssText = 'flex:1 1 auto;overflow:auto;margin:0;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:0.85em;';
 
+            const ta = document.createElement('textarea');
+            ta.id = 'cc_viewer_ta';
+            ta.style.cssText = 'flex:1 1 auto;display:none;margin:0;padding:10px;background:rgba(0,0,0,0.25);color:inherit;border:none;outline:none;resize:none;font-size:0.9em;font-family:monospace;';
+
+            const saveBtn = document.createElement('button');
+            saveBtn.id = 'cc_viewer_save';
+            saveBtn.textContent = 'Save';
+            saveBtn.className = 'cc_hbtn';
+            saveBtn.style.cssText = btnStyle + 'background:rgba(80,200,120,0.3);display:none;';
+
             head.appendChild(titleEl);
+            head.appendChild(saveBtn);
             head.appendChild(copyBtn);
             head.appendChild(closeBtn);
             box.appendChild(head);
             box.appendChild(pre);
+            box.appendChild(ta);
             document.body.appendChild(box);
 
             const hide = () => { backdrop.style.display = 'none'; box.style.display = 'none'; };
@@ -1372,8 +1531,16 @@
                 if (e.key === 'Escape' && box.style.display !== 'none') hide();
             });
             copyBtn.addEventListener('click', async () => {
-                const ok = await copyText(pre.textContent);
+                const src = (ta.style.display !== 'none') ? ta.value : pre.textContent;
+                const ok = await copyText(src);
                 toast(ok ? 'Copied to clipboard.' : 'Copy failed — select the text manually.', ok ? 'success' : 'error');
+            });
+
+            saveBtn.addEventListener('click', () => {
+                const cb = box._onSave;
+                backdrop.style.display = 'none';
+                box.style.display = 'none';
+                if (typeof cb === 'function') cb(ta.value);
             });
 
             // Same drag mechanism as the main panel.
@@ -1389,7 +1556,21 @@
         box.style.height = '62vh';
 
         el('cc_viewer_title').textContent = title + ' \u2014 v' + VERSION;
-        el('cc_viewer_pre').textContent = 'Continuity Copilot v' + VERSION + ' \u2014 drag me by this top bar. Close: the Close button, tapping the dark area, or Esc.\n\n' + text;
+        const taEl = el('cc_viewer_ta');
+        const preEl = el('cc_viewer_pre');
+        const saveEl = el('cc_viewer_save');
+        box._onSave = (typeof onSave === 'function') ? onSave : null;
+        if (box._onSave) {
+            taEl.value = text;
+            taEl.style.display = '';
+            preEl.style.display = 'none';
+            saveEl.style.display = '';
+        } else {
+            preEl.textContent = 'Continuity Copilot v' + VERSION + ' \u2014 drag me by this top bar. Close: the Close button, tapping the dark area, or Esc.\n\n' + text;
+            taEl.style.display = 'none';
+            preEl.style.display = '';
+            saveEl.style.display = 'none';
+        }
         backdrop.style.display = 'block';
         box.style.display = 'flex';
     }
@@ -1487,6 +1668,7 @@
             '    <button class="cc_btn" id="cc_diroff" title="Remove the directive">\uD83C\uDFAC Off</button>',
             '    <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
             '    <button class="cc_btn" id="cc_dirpeek" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek</button>',
+            '    <button class="cc_btn" id="cc_critique" title="Editor pass: generate/update standing craft notes for the storyteller">\uD83D\uDCDD Critique</button>',
             '    <button class="cc_btn" id="cc_undo" title="Undo last applied batch">Undo</button>',
             '    <button class="cc_btn" id="cc_memcheck" title="Show detected memory sources">Memory?</button>',
             '    <button class="cc_btn" id="cc_context" title="Show the full context the copilot receives">Context</button>',
@@ -1528,6 +1710,7 @@
         el('cc_diroff').addEventListener('click', () => clearDirective());
         el('cc_dirstat').addEventListener('click', () => directorStatus());
         el('cc_dirpeek').addEventListener('click', () => peekDirective());
+        el('cc_critique').addEventListener('click', () => generateCritique());
         el('cc_sess').addEventListener('change', () => switchSession(el('cc_sess').value));
         el('cc_sessnew').addEventListener('click', () => newSession());
         el('cc_sessbr').addEventListener('click', () => branchSession());
@@ -1568,11 +1751,13 @@
             '<div class="cc_check"><input type="checkbox" id="cc_stream"><span>Streaming (needs a Connection Profile)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_showthink"><span>Show thinking blocks</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_userok"><span>Allow editing my (user) messages</span></div>',
-            '<div class="cc_check"><input type="checkbox" id="cc_hidden"><span>Include ghosted/hidden messages in index (token heavy)</span></div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_hidden"><span>Full text previews for hidden/ghosted in index (token heavy; off = one-line stubs)</span></div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_rehide"><span>Auto re-hide pilot-hidden messages when a chat/branch loads</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_an"><span>Include Author\'s Note in story memory</span></div>',
             '<div class="cc_row">',
             '  <div><label>Director intensity</label><select id="cc_dir_int"><option value="slow-burn">slow-burn</option><option value="standard">standard</option><option value="intense">intense</option></select></div>',
             '  <div><label>Director depth</label><input type="number" id="cc_dir_depth" min="0" max="20"></div>',
+            '  <div><label>Critique depth</label><input type="number" id="cc_crit_depth" min="0" max="30"></div>',
             '</div>',
             '<label>Director style anchors (optional pacing references)</label>',
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
@@ -1586,6 +1771,7 @@
             '  <button class="cc_btn" id="cc_saveset">Save settings</button>',
             '  <button class="cc_btn" id="cc_resetprompt">Reset prompt</button>',
             '  <button class="cc_btn" id="cc_dirreset">Reset director prompt</button>',
+            '  <button class="cc_btn" id="cc_shortreset">Reset shortcuts</button>',
             '  <button class="cc_btn" id="cc_dumpsc">Raw memory data</button>',
             '</div>',
         ].join('\n');
@@ -1596,11 +1782,13 @@
         el('cc_pattern').value = settings.memoryKeyPattern;
         el('cc_userok').checked = !!settings.allowUserEdits;
         el('cc_hidden').checked = !!settings.includeHidden;
+        el('cc_rehide').checked = !!settings.autoRehide;
         el('cc_an').checked = !!settings.includeAuthorsNote;
         el('cc_stream').checked = !!settings.streaming;
         el('cc_showthink').checked = !!settings.showThinking;
         el('cc_dir_int').value = settings.directorIntensity || 'standard';
         el('cc_dir_depth').value = settings.directorDepth;
+        el('cc_crit_depth').value = settings.critiqueDepth;
         el('cc_dir_anchors').value = settings.directorAnchors || '';
         el('cc_dir_prompt').value = settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT;
         el('cc_shortcuts').value = settings.shortcuts;
@@ -1615,15 +1803,17 @@
             settings.memoryKeyPattern = el('cc_pattern').value || defaults.memoryKeyPattern;
             settings.allowUserEdits = el('cc_userok').checked;
             settings.includeHidden = el('cc_hidden').checked;
+            settings.autoRehide = el('cc_rehide').checked;
             settings.includeAuthorsNote = el('cc_an').checked;
             settings.streaming = el('cc_stream').checked;
             settings.showThinking = el('cc_showthink').checked;
             settings.directorIntensity = el('cc_dir_int').value || 'standard';
             settings.directorDepth = Number(el('cc_dir_depth').value) || 4;
+            settings.critiqueDepth = Number(el('cc_crit_depth').value) || 8;
             settings.directorAnchors = el('cc_dir_anchors').value;
             settings.directorPrompt = el('cc_dir_prompt').value || DEFAULT_DIRECTOR_PROMPT;
             settings.shortcuts = el('cc_shortcuts').value;
-            applyDirectorInjection();
+            applyInjections();
             settings.systemPrompt = el('cc_sysprompt').value || DEFAULT_SYSTEM_PROMPT;
             persistSettings();
             toast('Settings saved.', 'success');
@@ -1633,6 +1823,9 @@
         });
         el('cc_dirreset').addEventListener('click', () => {
             el('cc_dir_prompt').value = DEFAULT_DIRECTOR_PROMPT;
+        });
+        el('cc_shortreset').addEventListener('click', () => {
+            el('cc_shortcuts').value = DEFAULT_SHORTCUTS;
         });
         el('cc_dumpsc').addEventListener('click', () => {
             const c = ctx();
@@ -1800,9 +1993,11 @@
             const label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
             const card = document.createElement('div');
             card.className = 'cc_card';
-            const findShown = edit.find == null
-                ? (isMem ? '(replace entire field: ' + (edit.path || '?') + ')' : '(replace entire message)')
-                : edit.find;
+            const findShown = (!isMem && edit.hide !== null && edit.hide !== undefined)
+                ? (edit.hide ? '(hide message from AI context \u2014 text stays in log)' : '(unhide message)')
+                : edit.find == null
+                    ? (isMem ? '(replace entire field: ' + (edit.path || '?') + ')' : '(replace entire message)')
+                    : edit.find;
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b><span>' + esc(edit.reason || '') + '</span>' +
                 (edit.status === 'pending'
@@ -1920,6 +2115,29 @@
         } catch (e) { console.warn(LOG, 'slash registration failed', e); }
     }
 
+    async function reconcileHidden() {
+        if (!settings.autoRehide) return;
+        try {
+            const c = ctx();
+            const chat = c.chat;
+            if (!Array.isArray(chat) || !chat.length) return;
+            const led = metaRoot().ccHidden || [];
+            let n = 0;
+            for (const id of led) {
+                const msg = chat[id];
+                if (msg && !msg.is_system) {
+                    msg.is_system = true;
+                    refreshMessage(id);
+                    n++;
+                }
+            }
+            if (n) {
+                try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { /* ignore */ }
+                toast('\uD83D\uDD12 Re-hid ' + n + ' pilot-hidden message(s) after load.', 'info');
+            }
+        } catch (e) { console.warn(LOG, 'reconcile failed', e); }
+    }
+
     function bindEvents() {
         const c = ctx();
         try {
@@ -1931,7 +2149,8 @@
                     renderHistory();
                     renderEditCards();
                 }
-                applyDirectorInjection();
+                reconcileHidden();
+                applyInjections();
                 updateSub();
             });
             c.eventSource?.on?.(c.event_types?.MESSAGE_RECEIVED, async (i) => {
@@ -1966,7 +2185,7 @@
         try {
             loadSettings();
             buildPanel();
-            applyDirectorInjection();
+            applyInjections();
             addMenuButton();
             bindEvents();
             registerSlash();
