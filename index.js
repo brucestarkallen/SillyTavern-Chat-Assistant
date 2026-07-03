@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.8.3';
+    const VERSION = '1.8.4';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -120,6 +120,7 @@
 
     let settings = null;
     let pendingEdits = [];   // [{id, find, replace, reason, status}]
+    let editsCollapsed = false;
     let undoStack = [];      // [{label, items:[{id, before}]}]
     let running = false;
     let inited = false;
@@ -1088,7 +1089,9 @@
         running = true;
         setBusy(true);
         const sessAtStart = metaRoot().activeId;
-        const busy = addBubble('busy', 'thinking…');
+        const busy = addBubble('busy', Number.isInteger(opts.swipeIdx)
+            ? 'regenerating \u2014 new alternative (old answer kept as a swipe)\u2026'
+            : 'thinking\u2026');
         const live = (acc, reasoning) => {
             const log = el('cc_log');
             const pinned = !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
@@ -1152,6 +1155,7 @@
             if (parsedMem.error) addBubble('note', 'Memory edit block error: ' + parsedMem.error + ' — ask the copilot to resend valid JSON.');
             const allEdits = [...parsed.edits, ...parsedMem.edits];
             if (allEdits.length) {
+                editsCollapsed = false;
                 pendingEdits = allEdits;
                 renderEditCards();
             }
@@ -1192,6 +1196,7 @@
             renderHistory();
             const pe = parseEdits(entry.content);
             const pm = parseMemEdits(entry.content);
+            editsCollapsed = false;
             pendingEdits = [...pe.edits, ...pm.edits];
             renderEditCards();
             return;
@@ -2013,9 +2018,13 @@
         const head = document.createElement('div');
         head.className = 'cc_edits_head';
         head.innerHTML = '<span>Proposed edits: ' + pendingEdits.length + '</span>' +
+            '<button class="cc_btn" id="cc_toggleedits">' + (editsCollapsed ? 'Show' : 'Hide') + '</button>' +
             '<button class="cc_btn cc_primary" id="cc_applyall">Apply all pending</button>' +
             '<button class="cc_btn" id="cc_dismissall">Dismiss</button>';
         frag.appendChild(head);
+
+        const list = document.createElement('div');
+        if (editsCollapsed) list.style.display = 'none';
 
         pendingEdits.forEach((edit, idx) => {
             const isMem = edit.kind === 'mem';
@@ -2038,8 +2047,10 @@
                 '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' +
                 '<div class="cc_diff cc_after">' + esc(edit.replace) + '</div>' +
                 (edit.status !== 'pending' ? '<div class="cc_card_status">' + esc(edit.status) + '</div>' : '');
-            frag.appendChild(card);
+            list.appendChild(card);
         });
+
+        frag.appendChild(list);
 
         box.innerHTML = '';
         box.appendChild(frag);
@@ -2047,6 +2058,10 @@
         el('cc_applyall')?.addEventListener('click', () => applyEdits(pendingEdits));
         el('cc_dismissall')?.addEventListener('click', () => {
             pendingEdits = [];
+            renderEditCards();
+        });
+        el('cc_toggleedits')?.addEventListener('click', () => {
+            editsCollapsed = !editsCollapsed;
             renderEditCards();
         });
         box.querySelectorAll('[data-cc-apply]').forEach(btn => {
