@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.5.0';
+    const VERSION = '1.5.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -962,12 +962,13 @@
         setBusy(true);
         const busy = addBubble('busy', 'thinking…');
         const live = (acc, reasoning) => {
+            const log = el('cc_log');
+            const pinned = !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
             const head = (settings.showThinking && reasoning) ? '[thinking]\n' + reasoning + '\n\n' : '';
             const shown = (head + acc).trim();
             if (shown) busy.className = 'cc_bubble cc_ai';
             busy.innerHTML = esc(shown.slice(-3500) || 'thinking…');
-            const log = el('cc_log');
-            if (log) log.scrollTop = log.scrollHeight;
+            if (log && pinned) log.scrollTop = log.scrollHeight;
         };
         try {
             const messages = [
@@ -1633,8 +1634,9 @@
         div.className = 'cc_bubble ' + cls;
         div.innerHTML = esc(text);
         attachMsgIcons(div, kind, hidx);
+        const pinned = kind === 'user' || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
         log.appendChild(div);
-        log.scrollTop = log.scrollHeight;
+        if (pinned) log.scrollTop = log.scrollHeight;
         return div;
     }
 
@@ -1649,8 +1651,9 @@
         html += esc(stripBlocks(rest) || '(no text)');
         div.innerHTML = html;
         attachMsgIcons(div, 'ai', hidx);
+        const pinned = (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
         log.appendChild(div);
-        log.scrollTop = log.scrollHeight;
+        if (pinned) log.scrollTop = log.scrollHeight;
         return div;
     }
 
@@ -1665,6 +1668,7 @@
             else if (h.role === 'user') addBubble('user', h.content, i);
             else addBubble('note', h.content, i);
         }
+        log.scrollTop = log.scrollHeight;
         updateSub();
     }
 
