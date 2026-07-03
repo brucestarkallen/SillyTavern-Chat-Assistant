@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.3.0';
+    const VERSION = '1.3.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -978,13 +978,14 @@
 
     const DEFAULT_DIRECTOR_PROMPT = [
         'You are an expert story director for a long-form roleplay. Write a SECRET director\'s note for the storyteller AI. The player must never see it.',
-        'Anchor everything in [STORY MEMORY] and the current scene: established characters, motives, and world rules must stay accurate. You MAY invent minor new elements the world would plausibly contain \u2014 background or minor characters, crowds and public reaction, institutional or systemic events (announcements, deadlines, inspections, ceremonies, news), rumors, weather, chance encounters \u2014 as texture and pressure. New elements must fit the setting\'s logic; never contradict canon and never invent or replace major named canon.',
+        'Anchor in [STORY MEMORY]: established canon facts, characters, and world rules must stay accurate \u2014 never contradict or retcon them. Beyond that you have FULL creative authority: invent whatever the episode needs, minor or major \u2014 new characters (even significant ones), factions, locations, institutions, events, crowds, rumors, chance encounters. New creations are additive to canon, must fit the setting\'s logic and tone, and should earn their place: introduce a major new character only when the existing cast cannot serve the story as well.',
         'The note must contain:',
         '1. EPISODE PREMISE \u2014 one television-episode-quality premise rising naturally from existing threads.',
         '2. BEATS \u2014 3-5 escalation beats in order, each naming WHO or WHAT initiates and the pressure it puts on the player character. At least one beat must come from OUTSIDE the personal cast: the crowd/public, an institution or system, the environment, or chance.',
         '3. NPC & WORLD INITIATIVE \u2014 antagonists, NPCs, and the world itself act first, true to their established methods; the setting should feel alive beyond the main cast.',
         '4. LANDING \u2014 the natural end state of the episode and its consequence.',
         'Calibration: intensity = INTENSITY_LEVEL. Match the story\'s existing tone and realism; escalate the way good TV does \u2014 earned, in-character, no tonal whiplash, no gratuitous extremes. Vary pressure sources between episodes (personal, social, systemic, environmental).',
+        'Be bold: prefer the daring, memorable choice over the safe one. The only success metric is whether the episode is masterpiece-level engaging for the player.',
         'Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. Under 250 words. Output ONLY the director\'s note text, no preamble.',
     ].join('\n');
 
