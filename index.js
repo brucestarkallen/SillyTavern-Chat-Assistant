@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '0.5.4';
+    const VERSION = '0.5.5';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -168,12 +168,14 @@
 
         // 1) Live extension prompt injections (this is exactly what the main
         //    model sees from Summaryception: snippets, audit, notes, etc.)
+        const injKeys = new Set();
         try {
             const eps = c.extensionPrompts || {};
             for (const [key, p] of Object.entries(eps)) {
                 const val = p && typeof p.value === 'string' ? p.value.trim() : '';
                 if (val && re.test(key)) {
                     parts.push('--- injection: ' + key + ' ---\n' + val);
+                    injKeys.add(key.toLowerCase());
                 }
             }
         } catch (e) { console.warn(LOG, 'extensionPrompts read failed', e); }
@@ -183,6 +185,7 @@
             const md = c.chatMetadata || c.chat_metadata || {};
             for (const [key, v] of Object.entries(md)) {
                 if (key === MODULE || !re.test(key)) continue;
+                if (injKeys.has(key.toLowerCase())) continue; // same content already included via injection
                 let text = '';
                 if (typeof v === 'string') text = v;
                 else { try { text = JSON.stringify(v); } catch (e) { text = ''; } }
@@ -788,11 +791,18 @@
         catch (e) { re = /summar|ception|memory/i; }
         const matched = [];
         const ignored = [];
+        const dupes = [];
+        const injMatched = new Set();
         try {
             for (const [key, p] of Object.entries(c.extensionPrompts || {})) {
                 const val = p && typeof p.value === 'string' ? p.value.trim() : '';
                 if (!val || key === '2_floating_prompt') continue;
-                (re.test(key) ? matched : ignored).push('injection: ' + key + '  (' + val.length + ' chars)');
+                if (re.test(key)) {
+                    matched.push('injection: ' + key + '  (' + val.length + ' chars)');
+                    injMatched.add(key.toLowerCase());
+                } else {
+                    ignored.push('injection: ' + key + '  (' + val.length + ' chars)');
+                }
             }
         } catch (e) { /* ignore */ }
         try {
@@ -803,7 +813,12 @@
                 let text = typeof v === 'string' ? v : (() => { try { return JSON.stringify(v); } catch (e2) { return ''; } })();
                 text = String(text || '').trim();
                 if (!text || text === '{}' || text === '[]') continue;
-                (re.test(key) ? matched : ignored).push('metadata: ' + key + '  (' + text.length + ' chars)');
+                if (re.test(key)) {
+                    if (injMatched.has(key.toLowerCase())) dupes.push('metadata: ' + key + '  (' + text.length + ' chars)');
+                    else matched.push('metadata: ' + key + '  (' + text.length + ' chars)');
+                } else {
+                    ignored.push('metadata: ' + key + '  (' + text.length + ' chars)');
+                }
             }
         } catch (e) { /* ignore */ }
 
@@ -811,6 +826,11 @@
         lines.push('MATCHED SOURCES (included in story memory):');
         lines.push(matched.length ? matched.map(s => '  - ' + s).join('\n') : '  (none)');
         if (settings.includeAuthorsNote) lines.push("  - Author's Note (included when set)");
+        if (dupes.length) {
+            lines.push('');
+            lines.push('SKIPPED (same name as a matched injection = duplicate content, saves tokens):');
+            lines.push(dupes.map(s2 => '  - ' + s2).join('\n'));
+        }
         lines.push('');
         lines.push('VISIBLE BUT NOT MATCHED — to include one, copy a word from its name');
         lines.push('into the "Memory source words" box (words separated by |):');
