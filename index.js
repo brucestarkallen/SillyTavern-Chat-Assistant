@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.2.0';
+    const VERSION = '2.3.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -730,18 +730,91 @@
         return prev[n];
     }
 
-    function locate(hay, needle) {
-        // 1) exact
-        let idx = hay.indexOf(needle);
-        if (idx >= 0) return { start: idx, end: idx + needle.length, fuzzy: false };
+    function countOccurrences(hay, needle) {
+        if (!needle) return 0;
+        return String(hay).split(needle).length - 1;
+    }
 
-        // 2) quote/nbsp-normalized exact (length-preserving, indices map 1:1)
+    function hashText(t) {
+        let h = 5381;
+        const s2 = String(t || '');
+        for (let i = 0; i < s2.length; i++) h = ((h << 5) + h + s2.charCodeAt(i)) >>> 0;
+        return h + ':' + s2.length;
+    }
+
+    function memStrings(cb) {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata || {};
+        let re;
+        try { re = new RegExp(settings.memoryKeyPattern, 'i'); }
+        catch (e) { re = /summar|ception|memory/i; }
+        const visit = (node) => {
+            if (typeof node === 'string') { cb(node); return; }
+            if (Array.isArray(node)) { node.forEach(visit); return; }
+            if (node && typeof node === 'object') { for (const v of Object.values(node)) visit(v); }
+        };
+        for (const [key, val] of Object.entries(md)) {
+            if (key === MODULE) continue;
+            const extra = key === 'note_prompt' || key === 'cc_critique';
+            if (!re.test(key) && !extra) continue;
+            visit(val);
+        }
+    }
+
+    function memCountExact(needle) {
+        let n = 0;
+        memStrings(t => { n += countOccurrences(t, needle); });
+        return n;
+    }
+
+    function resolveMemPath(path) {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata || {};
+        const tokens = String(path).match(/[^.\[\]]+/g) || [];
+        if (!tokens.length) return undefined;
+        let node = md[tokens[0]];
+        for (let t = 1; t < tokens.length; t++) {
+            if (node == null || typeof node !== 'object') return undefined;
+            const k = /^\d+$/.test(tokens[t]) ? Number(tokens[t]) : tokens[t];
+            node = node[k];
+        }
+        return node;
+    }
+
+    function stampReviewState(list) {
+        try {
+            for (const e of list) {
+                if (e.kind === 'mem') {
+                    if (e.find) e.seenAtReview = memCountExact(e.find) > 0;
+                    else if (e.path) {
+                        const node = resolveMemPath(e.path);
+                        e.reviewHash = (typeof node === 'string') ? hashText(node) : null;
+                    }
+                } else if (e.kind === 'chat' && e.find && Number.isInteger(e.id)) {
+                    const m2 = ctx().chat?.[e.id];
+                    e.seenAtReview = !!(m2 && countOccurrences(String(m2.mes || ''), e.find) > 0);
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    function locate(hay, needle) {
+        const exactCount = countOccurrences(hay, needle);
+        if (exactCount > 1) return { ambiguous: exactCount };
+        if (exactCount === 1) {
+            const idx = hay.indexOf(needle);
+            return { start: idx, end: idx + needle.length, fuzzy: false };
+        }
+
         const hay2 = normChars(hay);
         const needle2 = normChars(needle);
-        idx = hay2.indexOf(needle2);
-        if (idx >= 0) return { start: idx, end: idx + needle2.length, fuzzy: false };
+        const normCount = countOccurrences(hay2, needle2);
+        if (normCount > 1) return { ambiguous: normCount };
+        if (normCount === 1) {
+            const idx2 = hay2.indexOf(needle2);
+            return { start: idx2, end: idx2 + needle2.length, fuzzy: false };
+        }
 
-        // 3) fuzzy sliding window over words (Levenshtein on word arrays)
         const tokens = [...hay.matchAll(/\S+/g)];
         if (!tokens.length || tokens.length > 4000) return null;
         const needleWords = needle2.split(/\s+/).filter(Boolean).map(w => w.toLowerCase());
@@ -758,15 +831,22 @@
         ])].filter(w => w >= 1 && w <= tokens.length);
 
         let best = null;
+        let second = 0;
         for (const w of widths) {
-            for (let s = 0; s + w <= tokens.length; s++) {
-                const cand = hayWords.slice(s, s + w);
+            for (let s2 = 0; s2 + w <= tokens.length; s2++) {
+                const cand = hayWords.slice(s2, s2 + w);
                 const dist = levenshtein(cand, needleWords);
                 const sim = 1 - dist / Math.max(cand.length, nw);
-                if (!best || sim > best.sim) best = { sim, s, w };
+                if (!best || sim > best.sim) {
+                    if (best && (s2 + w <= best.s || s2 >= best.s + best.w)) second = Math.max(second, best.sim);
+                    best = { sim, s: s2, w };
+                } else if (sim > second && (s2 + w <= best.s || s2 >= best.s + best.w)) {
+                    second = sim;
+                }
             }
         }
         if (best && best.sim >= 0.78) {
+            if (second >= best.sim - 0.05) return { ambiguous: 'fuzzy' };
             const startTok = tokens[best.s];
             const endTok = tokens[best.s + best.w - 1];
             return {
@@ -862,7 +942,8 @@
             next = String(edit.replace ?? '');
         } else {
             const loc = locate(before, edit.find);
-            if (!loc) return { ok: false, reason: '"find" text not located (even fuzzy)' };
+            if (loc && loc.ambiguous) return { ok: false, reason: 'anchor matches ' + (typeof loc.ambiguous === 'number' ? loc.ambiguous + ' places' : 'multiple similar places') + ' in this message \u2014 give a longer unique excerpt' };
+            if (!loc) return { ok: false, reason: edit.seenAtReview ? 'message changed since review \u2014 regenerate and apply fresh cards' : '"find" text not located (even fuzzy)' };
             next = before.slice(0, loc.start) + String(edit.replace ?? '') + before.slice(loc.end);
             if (loc.fuzzy) fuzzyNote = ' (fuzzy match ' + Math.round(loc.sim * 100) + '%)';
         }
@@ -884,6 +965,7 @@
                 const v = node[i];
                 if (typeof v === 'string') {
                     const loc = locate(v, find);
+                    if (loc && loc.ambiguous) return { ambiguous: true };
                     if (loc) { node[i] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '[' + i + ']', fuzzy: !!loc.fuzzy }; }
                 } else if (v && typeof v === 'object') {
                     const r = walkReplace(v, find, replace, path + '[' + i + ']');
@@ -895,6 +977,7 @@
         for (const [k, v] of Object.entries(node)) {
             if (typeof v === 'string') {
                 const loc = locate(v, find);
+                if (loc && loc.ambiguous) return { ambiguous: true };
                 if (loc) { node[k] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '.' + k, fuzzy: !!loc.fuzzy }; }
             } else if (v && typeof v === 'object') {
                 const r = walkReplace(v, find, replace, path + '.' + k);
@@ -911,6 +994,10 @@
         let re;
         try { re = new RegExp(settings.memoryKeyPattern, 'i'); }
         catch (e) { re = /summar|ception|memory/i; }
+        if (edit.find && !edit.path) {
+            const totalExact = memCountExact(edit.find);
+            if (totalExact > 1) return { ok: false, reason: 'anchor matches ' + totalExact + ' places across memory \u2014 give a longer unique excerpt' };
+        }
         if (edit.path) {
             const tokens = String(edit.path).match(/[^.\[\]]+/g) || [];
             if (!tokens.length) return { ok: false, reason: 'bad path' };
@@ -932,14 +1019,18 @@
                 key = /^\d+$/.test(tokens[t]) ? Number(tokens[t]) : tokens[t];
                 node = parent[key];
             }
-            if (typeof node !== 'string') return { ok: false, reason: 'path is not a text field' };
+            if (typeof node !== 'string') return { ok: false, reason: 'unknown memory path (no text field exists there)' };
             const backupVal = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
             if (edit.find) {
                 const loc = locate(node, edit.find);
+                if (loc && loc.ambiguous) return { ok: false, reason: 'anchor matches multiple places in that field \u2014 give a longer unique excerpt' };
                 if (!loc) return { ok: false, reason: '"find" text not located at that path' };
                 if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
                 parent[key] = node.slice(0, loc.start) + String(edit.replace ?? '') + node.slice(loc.end);
                 return { ok: true, path: edit.path, fuzzy: !!loc.fuzzy };
+            }
+            if (edit.reviewHash && hashText(node) !== edit.reviewHash) {
+                return { ok: false, reason: 'field changed since review \u2014 re-run the audit and apply fresh cards' };
             }
             if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
             parent[key] = String(edit.replace ?? '');
@@ -949,6 +1040,7 @@
             if (key === MODULE || !re.test(key) || val == null) continue;
             if (typeof val === 'string') {
                 const loc = locate(val, edit.find);
+                if (loc && loc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
                 if (loc) {
                     if (!keyBackups.has(key)) keyBackups.set(key, val);
                     md[key] = val.slice(0, loc.start) + String(edit.replace ?? '') + val.slice(loc.end);
@@ -959,6 +1051,7 @@
             if (typeof val === 'object') {
                 const backup = JSON.parse(JSON.stringify(val));
                 const hit = walkReplace(val, edit.find, String(edit.replace ?? ''), key);
+                if (hit && hit.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
                 if (hit) {
                     if (!keyBackups.has(key)) keyBackups.set(key, backup);
                     return { ok: true, path: hit.path, fuzzy: hit.fuzzy };
@@ -969,13 +1062,14 @@
             const exVal = md[exKey];
             if (typeof exVal !== 'string' || !exVal) continue;
             const exLoc = locate(exVal, edit.find);
+            if (exLoc && exLoc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
             if (exLoc) {
                 if (!keyBackups.has(exKey)) keyBackups.set(exKey, exVal);
                 md[exKey] = exVal.slice(0, exLoc.start) + String(edit.replace ?? '') + exVal.slice(exLoc.end);
                 return { ok: true, path: exKey, fuzzy: !!exLoc.fuzzy };
             }
         }
-        return { ok: false, reason: '"find" text not located in memory' };
+        return { ok: false, reason: edit.seenAtReview ? 'memory changed since review \u2014 re-run the audit and apply fresh cards' : '"find" text not located in memory' };
     }
 
     async function applyEdits(list) {
@@ -1230,6 +1324,7 @@
             const allEdits = [...parsed.edits, ...parsedMem.edits];
             if (allEdits.length) {
                 editsCollapsed = false;
+                stampReviewState(allEdits);
                 pendingEdits = allEdits;
                 renderEditCards();
             }
@@ -1271,7 +1366,9 @@
             const pe = parseEdits(entry.content);
             const pm = parseMemEdits(entry.content);
             editsCollapsed = false;
-            pendingEdits = [...pe.edits, ...pm.edits];
+            const swiped = [...pe.edits, ...pm.edits];
+            stampReviewState(swiped);
+            pendingEdits = swiped;
             renderEditCards();
             return;
         }
