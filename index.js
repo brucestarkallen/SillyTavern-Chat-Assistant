@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.3.0';
+    const VERSION = '2.4.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -64,6 +64,8 @@
         '- To replace an ENTIRE memory field, use {"path": "summaryception.notepad", "replace": "new full text", "reason": "..."} with the exact path shown in [STORY MEMORY] section headers. Adding "find" alongside "path" replaces only within that field.',
         '- The Author\'s Note is writable at path "note_prompt" (created if absent). The visible editor-critique notes are writable at path "cc_critique"; full replace with "" deletes them.',
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
+        '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
+        '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
         '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
     ].join('\n');
 
@@ -73,9 +75,10 @@
         '- The [MESSAGE INDEX] tags hidden messages "(hidden)" and memory-ghosted ones "(ghosted by memory)". You may unhide "(hidden)" messages when asked; NEVER unhide "(ghosted by memory)" ones \u2014 their content lives in the memory snippets.',
         '- Messages you hid are remembered in a ledger even if another extension later makes them visible again (the index will note this). If the user asks to "re-hide my OOC", emit hide edits for every id in that note.',
         '- In explanations, refer to blocks WITHOUT angle brackets (write "edits block", "memedits block", "fetch"). The literal tags must appear ONLY wrapping the actual JSON, never inside prose.',
+        '- Anchors ("find") must be UNIQUE within their target message \u2014 the applier REJECTS ambiguous anchors. When in doubt, extend the excerpt a few words on each side.',
     ].join('\n');
 
-    const AUDIT_PROMPT = 'Audit the whole chat against [STORY MEMORY]. Look for continuity and logic errors: wrong locations, wrong character knowledge (information quarantine breaks), timeline contradictions, dropped or duplicated plot state. Fetch full messages if you need them, then list what you found and propose fixes in an <edits> block.';
+    const AUDIT_PROMPT = 'Audit the whole chat against [STORY MEMORY]. Look for continuity and logic errors: wrong locations, wrong character knowledge (information quarantine breaks), timeline contradictions, dropped or duplicated plot state. Fetch full messages if you need them, then list what you found and propose fixes in an <edits> block, plus <memedits> wherever the memory itself is wrong.';
 
     const DEFAULT_SHORTCUTS = [
         '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then find (1) events, facts, or state changes MISSING from the memory and (2) memory entries that are stale or contradicted by the chat. Propose every correction in a single <memedits> block with "find" copied verbatim from [STORY MEMORY]. Do NOT propose <edits> to chat messages unless I explicitly ask.',
@@ -97,6 +100,7 @@
         'Calibration: intensity = INTENSITY_LEVEL. Match the story\'s existing tone and realism; escalate the way good TV does \u2014 earned, in-character, no tonal whiplash, no gratuitous extremes. Vary pressure sources between episodes (personal, social, systemic, environmental).',
         'Be bold: prefer the daring, memorable choice over the safe one. The only success metric is whether the episode is masterpiece-level engaging for the player.',
         'Write beats as pressure the player must answer \u2014 confrontations, deadlines, temptations with costs \u2014 never events that resolve themselves off-screen.',
+        'Honor any [editor notes] standing corrections present in the context \u2014 the episode you design must not repeat faults the editor has flagged.',
         'Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. Under 250 words. Output ONLY the director\'s note text, no preamble.',
     ].join('\n');
 
@@ -1516,6 +1520,7 @@
                 'Analyze for: claustrophobia (everything orbiting the MC), dropped characters or props (people who vanish mid-scene), missing ambient world life (background events, crowds, random encounters, off-screen agendas), repeated mistakes, contradictions with the world\'s own rules, and stale pacing.',
                 'Also mine any OOC/meta exchanges in the chat (corrections in (( )), [brackets], or marked OOC) for lessons the storyteller was already told.',
                 'Discipline: only add a correction you can tie to concrete evidence in the context. If the story has not meaningfully changed since [CURRENT NOTES], or no genuine new weakness exists, return the current notes unchanged apart from removing items the storyteller has demonstrably fixed. NEVER invent problems to fill space \u2014 an unchanged or shorter list is a good answer.',
+                'Standing notes are for SYSTEMIC patterns only; do not add a note for a one-off slip that a single chat edit could fix.',
                 'Write numbered standing corrections \u2014 as many as the story genuinely needs, no maximum. Each must be actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Optimize for perfection, immersion, engagement, and realism \u2014 while staying token-efficient: no padding, no repetition, no filler; every line must earn its place. Output ONLY the notes.',
             ].join('\n');
             const user = buildContextBlock() + (cur ? '\n\n[CURRENT NOTES]\n' + cur : '') + '\n\nWrite the standing notes now.';
@@ -1930,24 +1935,27 @@
             '<div id="cc_composer">',
             '  <div id="cc_quick">',
             '    <div style="display:flex;gap:6px;flex-wrap:wrap;">',
-            '      <button class="cc_btn" id="cc_audit" title="Full continuity audit">Audit chat</button>',
+            '      <button class="cc_btn" id="cc_audit" title="Full continuity audit">\uD83D\uDD0D Audit</button>',
             '      <button class="cc_btn" id="cc_dirnew" title="Set or replace the secret episode directive">\uD83C\uDFAC New</button>',
             '      <button class="cc_btn" id="cc_dirnext" title="Conclude this episode and direct the next">\uD83C\uDFAC Next</button>',
             '      <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
-            '      <button class="cc_btn" id="cc_dirpeek" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek</button>',
-            '      <button class="cc_btn" id="cc_diroff" title="Remove the directive">\uD83C\uDFAC Off</button>',
+            '      <button class="cc_btn" id="cc_critique" title="Editor pass: update standing craft notes">\uD83D\uDCDD Critique</button>',
             '    </div>',
-            '    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;">',
-            '      <button class="cc_btn" id="cc_critique" title="Editor pass: generate/update standing craft notes for the storyteller">\uD83D\uDCDD Critique</button>',
-            '      <button class="cc_btn" id="cc_critpeek" title="View or hand-edit the critique">\uD83D\uDCDD Peek</button>',
-            '      <button class="cc_btn" id="cc_memcheck" title="Show detected memory sources">Memory?</button>',
-            '      <button class="cc_btn" id="cc_context" title="Show the full context the copilot receives">Context</button>',
-            '    </div>',
-            '    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;">',
-            '      <button class="cc_btn" id="cc_retry" title="Regenerate the last copilot reply">Retry</button>',
-            '      <button class="cc_btn" id="cc_dellast" title="Delete the last question + answer">Del last</button>',
-            '      <button class="cc_btn" id="cc_undo" title="Undo last applied batch">Undo</button>',
-            '      <button class="cc_btn" id="cc_clear" title="Clear copilot conversation">Clear</button>',
+            '    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;align-items:center;">',
+            '      <button class="cc_btn" id="cc_retry" title="Regenerate the last copilot reply">\u21BB Retry</button>',
+            '      <button class="cc_btn" id="cc_dellast" title="Delete the last question + answer">\u232B Del last</button>',
+            '      <button class="cc_btn" id="cc_undo" title="Undo last applied batch">\u21B6 Undo</button>',
+            '      <div id="cc_more_wrap" style="position:relative;display:inline-block;">',
+            '        <button class="cc_btn" id="cc_more" title="More tools">\u22EE More</button>',
+            '        <div id="cc_more_menu" style="display:none;position:absolute;bottom:110%;right:0;background:#1e1e1e;border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:6px;z-index:60;min-width:170px;box-shadow:0 6px 18px rgba(0,0,0,0.55);">',
+            '          <button class="cc_btn" id="cc_dirpeek" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek directive</button>',
+            '          <button class="cc_btn" id="cc_diroff" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Remove the directive">\uD83C\uDFAC Director off</button>',
+            '          <button class="cc_btn" id="cc_critpeek" style="display:block;width:100%;margin:3px 0;text-align:left;" title="View or hand-edit the critique">\uD83D\uDCDD Peek critique</button>',
+            '          <button class="cc_btn" id="cc_memcheck" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show detected memory sources">\uD83E\uDDE0 Memory?</button>',
+            '          <button class="cc_btn" id="cc_context" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show the full context the copilot receives">\uD83D\uDCE6 Context</button>',
+            '          <button class="cc_btn" id="cc_clear" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Clear copilot conversation">\uD83E\uDDF9 Clear session</button>',
+            '        </div>',
+            '      </div>',
             '    </div>',
             '  </div>',
             '  <div id="cc_inputrow">',
@@ -1988,6 +1996,13 @@
         el('cc_dirpeek').addEventListener('click', () => peekDirective());
         el('cc_critique').addEventListener('click', () => generateCritique());
         el('cc_critpeek').addEventListener('click', () => peekCritique());
+        el('cc_more').addEventListener('click', () => {
+            const mm = el('cc_more_menu');
+            if (mm) mm.style.display = mm.style.display === 'none' ? 'block' : 'none';
+        });
+        el('cc_more_menu').addEventListener('click', () => {
+            setTimeout(() => { const mm = el('cc_more_menu'); if (mm) mm.style.display = 'none'; }, 60);
+        });
         el('cc_sess').addEventListener('change', () => switchSession(el('cc_sess').value));
         el('cc_sessnew').addEventListener('click', () => newSession());
         el('cc_sessbr').addEventListener('click', () => branchSession());
@@ -2161,26 +2176,38 @@
         if (rt) rt.disabled = b;
     }
 
+    function mdLite(text) {
+        let t = esc(text);
+        t = t.replace(/`([^`\n]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:0 4px;border-radius:4px;">$1</code>');
+        t = t.replace(/\*\*([^*\n][^*]*?)\*\*/g, '<b>$1</b>');
+        t = t.replace(/(^|\s)\*([^*\n]+)\*(?=\s|$)/g, '$1<i>$2</i>');
+        t = t.replace(/^#{1,3}\s+(.+)$/gm, '<b>$1</b>');
+        t = t.replace(/^\s*[-\u2022]\s+/gm, '\u2003\u2022 ');
+        t = t.replace(/\n/g, '<br>');
+        return t;
+    }
+
     function attachMsgIcons(div, kind, hidx) {
         if (!Number.isInteger(hidx)) return;
-        const mk = (txt, title, fn, op) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:14px;justify-content:flex-end;margin-top:6px;opacity:0.5;font-size:0.85em;user-select:none;';
+        const mk = (txt, title, fn) => {
             const sp = document.createElement('span');
             sp.textContent = txt;
             sp.title = title;
-            sp.style.cssText = 'margin-left:8px;cursor:pointer;opacity:' + (op || '0.55') + ';font-size:0.9em;';
+            sp.style.cssText = 'cursor:pointer;';
             sp.addEventListener('click', fn);
-            div.appendChild(sp);
+            row.appendChild(sp);
         };
-        if (kind === 'user') {
-            mk('\u270E', 'Edit this message and continue from here', () => startEditUserMessage(hidx), '0.6');
-        }
+        if (kind === 'user') mk('\u270E', 'Edit this message and continue from here', () => startEditUserMessage(hidx));
         mk('\uD83D\uDCCB', 'Copy message text', async () => {
             const h = meta().history[hidx];
             const ok = await copyText(String(h?.content ?? ''));
             toast(ok ? 'Copied.' : 'Copy failed.', ok ? 'success' : 'error');
         });
         mk('\uD83C\uDF3F', 'Branch: new session starting from this message', () => branchAt(hidx));
-        mk('\u2715', 'Delete this message', () => deleteMessageAt(hidx), '0.5');
+        mk('\u2715', 'Delete this message', () => deleteMessageAt(hidx));
+        div.appendChild(row);
     }
 
     function addBubble(kind, text, hidx) {
@@ -2188,6 +2215,9 @@
         const div = document.createElement('div');
         const cls = kind === 'user' ? 'cc_user' : kind === 'assistant' || kind === 'ai' ? 'cc_ai' : kind === 'busy' ? 'cc_busy' : 'cc_note';
         div.className = 'cc_bubble ' + cls;
+        div.style.padding = '8px 12px';
+        div.style.lineHeight = '1.45';
+        div.style.borderRadius = '12px';
         div.innerHTML = esc(text);
         attachMsgIcons(div, kind, hidx);
         const pinned = kind === 'user' || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
@@ -2200,11 +2230,14 @@
         const log = el('cc_log');
         const div = document.createElement('div');
         div.className = 'cc_bubble cc_ai';
+        div.style.padding = '8px 12px';
+        div.style.lineHeight = '1.5';
+        div.style.borderRadius = '12px';
         let html = '';
         if (settings.showThinking && think) {
             html += '<details class="cc_think"><summary>thinking</summary><div>' + esc(think) + '</div></details>';
         }
-        html += esc(stripBlocks(rest) || '(no text)');
+        html += mdLite(stripBlocks(rest) || '(no text)');
         div.innerHTML = html;
         attachMsgIcons(div, 'ai', hidx);
         const pinned = (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
