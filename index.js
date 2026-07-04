@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.4.0';
+    const VERSION = '2.5.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -124,6 +124,10 @@
         autoRehide: true,
         critiqueAuto: 0,
         directorAuto: false,
+        ledgerAuto: 0,
+        ledgerDepth: 6,
+        ledgerWindow: 20,
+        ledgerInject: true,
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
     };
@@ -1469,6 +1473,7 @@
     function applyInjections() {
         applyDirectorInjection();
         applyCritiqueInjection();
+        applyLedgerInjection();
     }
 
     function critiqueItems(t) {
@@ -1953,6 +1958,9 @@
             '          <button class="cc_btn" id="cc_critpeek" style="display:block;width:100%;margin:3px 0;text-align:left;" title="View or hand-edit the critique">\uD83D\uDCDD Peek critique</button>',
             '          <button class="cc_btn" id="cc_memcheck" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show detected memory sources">\uD83E\uDDE0 Memory?</button>',
             '          <button class="cc_btn" id="cc_context" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show the full context the copilot receives">\uD83D\uDCE6 Context</button>',
+            '          <button class="cc_btn" id="cc_ledger_now" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Run a character-ledger update pass now">\uD83E\uDDEC Ledger: update</button>',
+            '          <button class="cc_btn" id="cc_ledger_peek" style="display:block;width:100%;margin:3px 0;text-align:left;" title="View or hand-edit the ledger JSON">\uD83E\uDDEC Ledger: peek/edit</button>',
+            '          <button class="cc_btn" id="cc_ledger_restore" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Restore the most recent ledger backup">\uD83E\uDDEC Ledger: restore</button>',
             '          <button class="cc_btn" id="cc_clear" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Clear copilot conversation">\uD83E\uDDF9 Clear session</button>',
             '        </div>',
             '      </div>',
@@ -1996,6 +2004,9 @@
         el('cc_dirpeek').addEventListener('click', () => peekDirective());
         el('cc_critique').addEventListener('click', () => generateCritique());
         el('cc_critpeek').addEventListener('click', () => peekCritique());
+        el('cc_ledger_now').addEventListener('click', () => runLedgerUpdate(false));
+        el('cc_ledger_peek').addEventListener('click', () => ledgerPeek());
+        el('cc_ledger_restore').addEventListener('click', () => ledgerRestore());
         el('cc_more').addEventListener('click', () => {
             const mm = el('cc_more_menu');
             if (mm) mm.style.display = mm.style.display === 'none' ? 'block' : 'none';
@@ -2059,6 +2070,13 @@
             '<label>Auto-critique: run the editor every N storyteller replies (0 = off; needs a Connection Profile)</label>',
             '<input type="number" id="cc_crit_auto" min="0" max="100">',
             '<div class="cc_check"><input type="checkbox" id="cc_dir_auto"><span>Auto-director: keep a secret episode running (auto-starts E1, auto-chains Next on conclusion; needs a Connection Profile)</span></div>',
+            '<label>Character ledger: auto-update every N storyteller replies (0 = off)</label>',
+            '<input type="number" id="cc_led_auto" min="0" max="100">',
+            '<div class="cc_row">',
+            '  <div><label>Ledger injection depth</label><input type="number" id="cc_led_depth" min="0" max="30"></div>',
+            '  <div><label>Ledger active window (msgs)</label><input type="number" id="cc_led_win" min="1" max="100"></div>',
+            '</div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_led_inject"><span>Inject [CHARACTER CONTINUITY] into the storyteller</span></div>',
             '<label>Director system prompt (INTENSITY_LEVEL is replaced automatically)</label>',
             '<textarea id="cc_dir_prompt"></textarea>',
             '<div style="margin:10px 0 2px;font-weight:600;opacity:0.75;">Prompts & shortcuts</div>',
@@ -2091,6 +2109,10 @@
         el('cc_dir_anchors').value = settings.directorAnchors || '';
         el('cc_crit_auto').value = settings.critiqueAuto;
         el('cc_dir_auto').checked = !!settings.directorAuto;
+        el('cc_led_auto').value = settings.ledgerAuto;
+        el('cc_led_depth').value = settings.ledgerDepth;
+        el('cc_led_win').value = settings.ledgerWindow;
+        el('cc_led_inject').checked = !!settings.ledgerInject;
         el('cc_dir_prompt').value = settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT;
         el('cc_shortcuts').value = settings.shortcuts;
         el('cc_sysprompt').value = settings.systemPrompt;
@@ -2114,6 +2136,10 @@
             settings.directorAnchors = el('cc_dir_anchors').value;
             settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
             settings.directorAuto = el('cc_dir_auto').checked;
+            settings.ledgerAuto = Math.max(0, Number(el('cc_led_auto').value) || 0);
+            settings.ledgerDepth = Number(el('cc_led_depth').value) || 6;
+            settings.ledgerWindow = Math.max(1, Number(el('cc_led_win').value) || 20);
+            settings.ledgerInject = el('cc_led_inject').checked;
             settings.directorPrompt = el('cc_dir_prompt').value || DEFAULT_DIRECTOR_PROMPT;
             settings.shortcuts = el('cc_shortcuts').value;
             applyInjections();
@@ -2468,6 +2494,252 @@
         } catch (e) { console.warn(LOG, 'reconcile failed', e); }
     }
 
+    const LEDGER_KEY = 'cc_memory_ledger';
+    const LEDGER_BK = 'cc_memory_ledger_backups';
+
+    function ledgerGet() {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata;
+        if (!md) return { lastProcessedTurn: -1, characters: {} };
+        let L = md[LEDGER_KEY];
+        if (!L || typeof L !== 'object' || Array.isArray(L)) {
+            L = { lastProcessedTurn: -1, characters: {} };
+            md[LEDGER_KEY] = L;
+        }
+        if (!Number.isInteger(L.lastProcessedTurn)) L.lastProcessedTurn = -1;
+        if (!L.characters || typeof L.characters !== 'object') L.characters = {};
+        return L;
+    }
+
+    function ledgerBackup() {
+        const c = ctx();
+        const md = c.chatMetadata || c.chat_metadata;
+        if (!md) return;
+        if (!Array.isArray(md[LEDGER_BK])) md[LEDGER_BK] = [];
+        md[LEDGER_BK].push(JSON.parse(JSON.stringify(ledgerGet())));
+        while (md[LEDGER_BK].length > 3) md[LEDGER_BK].shift();
+    }
+
+    function ledgerResolveName(L, name) {
+        const n = String(name || '').trim();
+        if (!n) return null;
+        const low = n.toLowerCase();
+        for (const [canon, ch] of Object.entries(L.characters)) {
+            if (canon.toLowerCase() === low) return canon;
+            if (Array.isArray(ch.aliases) && ch.aliases.some(a => String(a).toLowerCase() === low)) return canon;
+        }
+        for (const [canon, ch] of Object.entries(L.characters)) {
+            const cands = [canon, ...(Array.isArray(ch.aliases) ? ch.aliases : [])];
+            for (const cand of cands) {
+                if (itemSim(String(cand), n) >= 0.78) return canon;
+            }
+        }
+        return null;
+    }
+
+    function ledgerEnsureChar(L, name) {
+        const found = ledgerResolveName(L, name);
+        if (found) return found;
+        const canon = String(name).trim().slice(0, 60);
+        L.characters[canon] = { aliases: [], alwaysInject: false, state: '', relationships: {}, knowledge: { knows: [], doesNotKnow: [] }, arc: [] };
+        return canon;
+    }
+
+    function applyLedgerOps(ops) {
+        const L = ledgerGet();
+        const counts = { chars: new Set(), rel: 0, arc: 0, know: 0, alias: 0, created: [] };
+        const clip = (t, n2) => String(t == null ? '' : t).trim().slice(0, n2);
+        for (const op of Array.isArray(ops) ? ops : []) {
+            if (!op || typeof op !== 'object' || typeof op.op !== 'string' || !op.name) continue;
+            const existed = !!ledgerResolveName(L, op.name);
+            const canon = ledgerEnsureChar(L, op.name);
+            if (!existed) counts.created.push(canon);
+            const ch = L.characters[canon];
+            counts.chars.add(canon);
+            if (op.op === 'upsert_char') {
+                if (op.state != null) ch.state = clip(op.state, 260);
+            } else if (op.op === 'add_arc') {
+                const note = clip(op.note, 160);
+                if (note) {
+                    ch.arc.push({ atTurn: Number(op.atTurn) || 0, note });
+                    if (ch.arc.length > 12) {
+                        const a2 = ch.arc.shift();
+                        const b2 = ch.arc.shift();
+                        ch.arc.unshift({ atTurn: a2.atTurn, note: 'T' + a2.atTurn + ': ' + a2.note + '; T' + b2.atTurn + ': ' + b2.note });
+                    }
+                    counts.arc++;
+                }
+            } else if (op.op === 'set_relationship' && op.target) {
+                const tgt = ledgerEnsureChar(L, op.target);
+                const trend = ['warming', 'cooling', 'stable'].includes(op.trend) ? op.trend : 'stable';
+                ch.relationships[tgt] = { label: clip(op.label, 90), trend, sinceTurn: Number(op.sinceTurn) || (ctx().chat?.length || 0) };
+                counts.rel++;
+            } else if (op.op === 'set_knowledge') {
+                const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => clip(x, 90)).filter(Boolean).slice(0, 12);
+                if (op.knows != null) ch.knowledge.knows = norm(op.knows);
+                if (op.doesNotKnow != null) ch.knowledge.doesNotKnow = norm(op.doesNotKnow);
+                counts.know++;
+            } else if (op.op === 'merge_alias' && op.alias) {
+                const al = clip(op.alias, 60);
+                if (al && !ch.aliases.some(a => a.toLowerCase() === al.toLowerCase())) { ch.aliases.push(al); counts.alias++; }
+            }
+        }
+        return counts;
+    }
+
+    function buildLedgerInput(fromTurn) {
+        const chat = ctx().chat || [];
+        const parts = [];
+        for (let i = Math.max(0, fromTurn + 1); i < chat.length; i++) {
+            const m = chat[i];
+            if (!m || m.is_system) continue;
+            const who = m.is_user ? 'USER' : (m.name || 'AI');
+            parts.push('--- #' + i + ' [' + who + '] ---\n' + String(m.mes || '').slice(0, 8000));
+        }
+        let text = parts.join('\n\n');
+        while (text.length > 60000 && parts.length > 1) { parts.shift(); text = parts.join('\n\n'); }
+        return text;
+    }
+
+    function applyLedgerInjection() {
+        const c = ctx();
+        const depth = Number(settings?.ledgerDepth) || 6;
+        const role = c.extension_prompt_roles?.SYSTEM ?? 0;
+        try {
+            if (!settings?.ledgerInject) { c.setExtensionPrompt(LEDGER_KEY, '', 1, depth, false, role); return; }
+            const L = ledgerGet();
+            const names = Object.keys(L.characters);
+            if (!names.length) { c.setExtensionPrompt(LEDGER_KEY, '', 1, depth, false, role); return; }
+            const chat = c.chat || [];
+            const M = Math.max(1, Number(settings.ledgerWindow) || 20);
+            let recent = '';
+            for (let i = Math.max(0, chat.length - M); i < chat.length; i++) {
+                const m = chat[i];
+                if (m && !m.is_system) recent += ' ' + String(m.mes || '').toLowerCase();
+            }
+            const lines = [];
+            for (const canon of names) {
+                const ch = L.characters[canon];
+                const keys = [canon, ...(Array.isArray(ch.aliases) ? ch.aliases : [])];
+                const active = ch.alwaysInject || keys.some(k => k && recent.includes(String(k).toLowerCase()));
+                if (!active) continue;
+                let line = canon + ' \u2014 ' + (ch.state || 'present');
+                const rels = Object.entries(ch.relationships || {}).map(([t, r]) => t + ': ' + r.label + ' (' + r.trend + ')');
+                if (rels.length) line += ' | Relations: ' + rels.join('; ');
+                if (ch.knowledge?.knows?.length) line += ' | Knows: ' + ch.knowledge.knows.join(', ');
+                if (ch.knowledge?.doesNotKnow?.length) line += ' | Does NOT know: ' + ch.knowledge.doesNotKnow.join(', ') + ' \u2014 never let them act on these.';
+                lines.push(line);
+                if (lines.join('\n').length > 1800) break;
+            }
+            const value = lines.length ? '[CHARACTER CONTINUITY \u2014 current qualitative state; knowledge boundaries are hard rules:]\n' + lines.join('\n') : '';
+            c.setExtensionPrompt(LEDGER_KEY, value, 1, depth, false, role);
+        } catch (e) { console.warn(LOG, 'ledger injection failed', e); }
+    }
+
+    async function runLedgerUpdate(isAuto) {
+        if (running) return;
+        const c = ctx();
+        if (!Array.isArray(c.chat) || !c.chat.length) return;
+        running = true;
+        setBusy(true);
+        const busyNote = addBubble('busy', (isAuto ? 'auto-' : '') + 'updating character ledger\u2026');
+        try {
+            const L = ledgerGet();
+            const input = buildLedgerInput(L.lastProcessedTurn);
+            if (!input.trim()) { addBubble('note', '\uD83E\uDDEC Ledger: nothing new to process.'); return; }
+            const sys = [
+                'You maintain a qualitative CHARACTER LEDGER for a long roleplay. You receive the current ledger JSON and the new messages since the last pass.',
+                'Output ONLY a block: <ledgerops>[ ...patch ops... ]</ledgerops> \u2014 a STRICT JSON array of ops, never a full rewrite. Allowed ops:',
+                '{"op":"upsert_char","name":"..","state":"1-2 line current qualitative state"}',
+                '{"op":"add_arc","name":"..","atTurn":123,"note":"turning point, one line"}',
+                '{"op":"set_relationship","name":"..","target":"..","label":"e.g. rivals\u2192grudging allies","trend":"warming|cooling|stable","sinceTurn":123}',
+                '{"op":"set_knowledge","name":"..","knows":["fact"],"doesNotKnow":["secret"]}',
+                '{"op":"merge_alias","name":"CanonicalName","alias":"Nickname"}',
+                'Rules: qualitative continuity ONLY \u2014 never numeric stats (P/R/S etc.). Only characters actually present or affected in the new messages. Knowledge entries are short factual phrases. Use existing canonical names/aliases; never invent duplicates for the same person. Only record real changes; an empty array [] is a valid answer.',
+            ].join('\n');
+            const user = '[CURRENT LEDGER]\n' + JSON.stringify(L) + '\n\n[NEW MESSAGES]\n' + input + '\n\nEmit the ledgerops block now.';
+            let raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: user }]);
+            if (stopRequested) { addBubble('note', 'Stopped \u2014 ledger unchanged.'); return; }
+            let b = findBlock(splitThinking(raw).rest, 'ledgerops');
+            let ops = null;
+            try { ops = b ? JSON.parse(b.inner.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '')) : null; } catch (e) { ops = null; }
+            if (!Array.isArray(ops)) {
+                raw = await callLLM([
+                    { role: 'system', content: sys },
+                    { role: 'user', content: user },
+                    { role: 'assistant', content: splitThinking(raw).rest.slice(0, 4000) },
+                    { role: 'user', content: 'That was not a valid ledgerops JSON array. Resend ONLY the <ledgerops>[...]</ledgerops> block with valid JSON.' },
+                ]);
+                if (stopRequested) { addBubble('note', 'Stopped \u2014 ledger unchanged.'); return; }
+                b = findBlock(splitThinking(raw).rest, 'ledgerops');
+                try { ops = b ? JSON.parse(b.inner.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '')) : null; } catch (e) { ops = null; }
+            }
+            if (!Array.isArray(ops)) { toast('\uD83E\uDDEC Ledger update failed to parse \u2014 ledger unchanged.', 'error'); addBubble('note', '\uD83E\uDDEC Ledger update failed to parse twice \u2014 unchanged.'); return; }
+            const md = c.chatMetadata || c.chat_metadata;
+            const before = JSON.parse(JSON.stringify(ledgerGet()));
+            ledgerBackup();
+            const counts = applyLedgerOps(ops);
+            ledgerGet().lastProcessedTurn = c.chat.length - 1;
+            undoStack.push({ label: 'ledger update', items: [{ kind: 'mem', key: LEDGER_KEY, before }] });
+            saveMeta();
+            applyLedgerInjection();
+            const note = '\uD83E\uDDEC Ledger updated' + (isAuto ? ' (auto)' : '') + ': ' + counts.chars.size + ' character(s), ' + counts.rel + ' relationship(s), ' + counts.arc + ' arc, ' + counts.know + ' knowledge' + (counts.created.length ? ' \u2014 new: ' + counts.created.join(', ') : '') + '. Undo restores.';
+            addBubble('note', note);
+            pushHistory('note', note);
+        } catch (err) {
+            addBubble('note', 'Ledger error: ' + (err?.message || err));
+        } finally {
+            busyNote.remove();
+            running = false;
+            setBusy(false);
+        }
+    }
+
+    function maybeAutoLedger() {
+        try {
+            const n = Number(settings.ledgerAuto) || 0;
+            if (n <= 0) return;
+            const m = metaRoot();
+            m.ledgerAutoCount = (Number(m.ledgerAutoCount) || 0) + 1;
+            saveMeta();
+            if (m.ledgerAutoCount < n) return;
+            if (running) return;
+            if (!settings.profileId) return;
+            m.ledgerAutoCount = 0;
+            saveMeta();
+            runLedgerUpdate(true);
+        } catch (e) { /* ignore */ }
+    }
+
+    function ledgerPeek() {
+        const L = ledgerGet();
+        showViewer('\uD83E\uDDEC Character ledger (edit JSON + Save)', JSON.stringify(L, null, 2), (t) => {
+            try {
+                const parsed = JSON.parse(t);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('must be an object');
+                if (!parsed.characters || typeof parsed.characters !== 'object') throw new Error('missing characters object');
+                ledgerBackup();
+                const md = ctx().chatMetadata || ctx().chat_metadata;
+                md[LEDGER_KEY] = parsed;
+                saveMeta();
+                applyLedgerInjection();
+                addBubble('note', '\uD83E\uDDEC Ledger manually edited.');
+            } catch (e) {
+                toast('Ledger not saved \u2014 invalid JSON: ' + e.message, 'error');
+            }
+        });
+    }
+
+    function ledgerRestore() {
+        const md = ctx().chatMetadata || ctx().chat_metadata;
+        if (!md || !Array.isArray(md[LEDGER_BK]) || !md[LEDGER_BK].length) { toast('No ledger backups yet.', 'warning'); return; }
+        if (!confirm('Restore the most recent ledger backup? (' + md[LEDGER_BK].length + ' available)')) return;
+        md[LEDGER_KEY] = md[LEDGER_BK].pop();
+        saveMeta();
+        applyLedgerInjection();
+        addBubble('note', '\uD83E\uDDEC Ledger restored from backup.');
+    }
+
     function maybeAutoDirector() {
         try {
             if (!settings.directorAuto) return;
@@ -2550,6 +2822,7 @@
                     if (!msg || msg.is_user || typeof msg.mes !== 'string') return;
                     maybeAutoCritique();
                     maybeAutoDirector();
+                    maybeAutoLedger();
                     if (!msg.mes.includes('[EPISODE_END]')) return;
                     msg.mes = msg.mes.replace(/\s*\[EPISODE_END\]\s*$/, '').replace(/\[EPISODE_END\]/g, '').trim();
                     refreshMessage(Number(i));
