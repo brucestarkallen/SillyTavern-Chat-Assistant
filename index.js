@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.9.7';
+    const VERSION = '2.0.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -116,6 +116,7 @@
         directorPrompt: DEFAULT_DIRECTOR_PROMPT,
         critiqueDepth: 8,
         autoRehide: true,
+        critiqueAuto: 0,
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
     };
@@ -1389,11 +1390,11 @@
         return out;
     }
 
-    async function generateCritique() {
+    async function generateCritique(isAuto) {
         if (running) return;
         running = true;
         setBusy(true);
-        const busyNote = addBubble('busy', 'the editor is reviewing\u2026');
+        const busyNote = addBubble('busy', isAuto ? 'auto-editor reviewing the story\u2026' : 'the editor is reviewing\u2026');
         try {
             const c = ctx();
             const md = c.chatMetadata || c.chat_metadata || {};
@@ -1417,7 +1418,7 @@
             undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur }] });
             saveMeta();
             applyCritiqueInjection();
-            const note = '\uD83D\uDCDD Critique updated: ' + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)';
+            const note = (isAuto ? '\uD83D\uDCDD Auto-critique: ' : '\uD83D\uDCDD Critique updated: ') + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)';
             addBubble('note', note);
             pushHistory('note', note);
         } catch (err) {
@@ -1915,6 +1916,8 @@
             '</div>',
             '<label>Director style anchors (optional pacing references)</label>',
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
+            '<label>Auto-critique: run the editor every N storyteller replies (0 = off; needs a Connection Profile)</label>',
+            '<input type="number" id="cc_crit_auto" min="0" max="100">',
             '<label>Director system prompt (INTENSITY_LEVEL is replaced automatically)</label>',
             '<textarea id="cc_dir_prompt"></textarea>',
             '<label>Shortcut commands (one per line: #tag = prompt)</label>',
@@ -1944,6 +1947,7 @@
         el('cc_dir_depth').value = settings.directorDepth;
         el('cc_crit_depth').value = settings.critiqueDepth;
         el('cc_dir_anchors').value = settings.directorAnchors || '';
+        el('cc_crit_auto').value = settings.critiqueAuto;
         el('cc_dir_prompt').value = settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT;
         el('cc_shortcuts').value = settings.shortcuts;
         el('cc_sysprompt').value = settings.systemPrompt;
@@ -1965,6 +1969,7 @@
             settings.directorDepth = Number(el('cc_dir_depth').value) || 4;
             settings.critiqueDepth = Number(el('cc_crit_depth').value) || 8;
             settings.directorAnchors = el('cc_dir_anchors').value;
+            settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
             settings.directorPrompt = el('cc_dir_prompt').value || DEFAULT_DIRECTOR_PROMPT;
             settings.shortcuts = el('cc_shortcuts').value;
             applyInjections();
@@ -2301,6 +2306,22 @@
         } catch (e) { console.warn(LOG, 'reconcile failed', e); }
     }
 
+    function maybeAutoCritique() {
+        try {
+            const n = Number(settings.critiqueAuto) || 0;
+            if (n <= 0) return;
+            const m = metaRoot();
+            m.critAutoCount = (Number(m.critAutoCount) || 0) + 1;
+            saveMeta();
+            if (m.critAutoCount < n) return;
+            if (running) return; // stay pending; next reply retries
+            if (!settings.profileId) return; // never hijack the main API for background work
+            m.critAutoCount = 0;
+            saveMeta();
+            generateCritique(true);
+        } catch (e) { /* ignore */ }
+    }
+
     function scrubEpisodeMarkers() {
         try {
             const c = ctx();
@@ -2354,6 +2375,7 @@
                     reconcileHidden();
                     const msg = ctx().chat?.[Number(i)];
                     if (!msg || msg.is_user || typeof msg.mes !== 'string') return;
+                    maybeAutoCritique();
                     if (!msg.mes.includes('[EPISODE_END]')) return;
                     msg.mes = msg.mes.replace(/\s*\[EPISODE_END\]\s*$/, '').replace(/\[EPISODE_END\]/g, '').trim();
                     refreshMessage(Number(i));
