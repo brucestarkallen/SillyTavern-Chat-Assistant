@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '1.9.6';
+    const VERSION = '1.9.7';
 
     // ------------------------------------------------------------------
     // Defaults
