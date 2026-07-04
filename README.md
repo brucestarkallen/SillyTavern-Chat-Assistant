@@ -108,6 +108,16 @@ No conflict — you can keep ST-Copilot installed for its other features (lorebo
 - **Edit fails with "find text not located"** — the model misquoted too heavily; tell it "resend the edits, copy find verbatim".
 - **Panel doesn't appear** — check the browser console (F12) for `[ContinuityCopilot]` errors and report them.
 
+## What's in v2.1 (feature map)
+
+- **Copilot chat**: sessions (+branch at any message), swipes on the latest reply, edit-and-continue, per-message copy/delete, Retry, Stop, streaming with collapsible thinking, smart scrolling.
+- **Chat surgery**: find/replace and whole-message edits, hide/unhide (OOC-safe, ception-aware, auto re-hide guard with per-chat ledger), diff cards with Undo.
+- **Memory surgery**: memedits on Summaryception (notepad/snippets/audits), Author's Note (path note_prompt), editor notes (path cc_critique); whole-field replace via path; everything undoable.
+- **Commands**: `#f` fix chat vs memory · `#s` sync memory vs chat · `#m` memory vs itself · `#a` snippet fidelity vs originals · `#o` OOC harvest+hide · `#i` ideas · `#d <text>` steer the director.
+- **🎬 Director**: secret episode directives (New/Next/Off), spoiler-free status (?), editable Peek, episode-end detection, persistent episode counter, **auto mode** (auto-start + auto-chain).
+- **📝 Editor**: standing craft critique injected persistently; generate with evidence discipline and local diff receipts; editable Peek; **auto mode** (every N storyteller replies).
+- Everything runs on your chosen Connection Profile; auto features never touch the main API.
+
 ## License
 
 MIT. The fuzzy-anchor edit-application idea is inspired by [ST-Copilot](https://github.com/Supker/St-Copilot) (MIT); all code here is written from scratch. Reading Summaryception's runtime data does not make this a derivative work of that (AGPL-3.0) extension — but if you ever copy code from it into this project, relicense this project as AGPL-3.0.

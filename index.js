@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.0.0';
+    const VERSION = '2.1.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -95,6 +95,7 @@
         '4. LANDING \u2014 the natural end state of the episode and its consequence.',
         'Calibration: intensity = INTENSITY_LEVEL. Match the story\'s existing tone and realism; escalate the way good TV does \u2014 earned, in-character, no tonal whiplash, no gratuitous extremes. Vary pressure sources between episodes (personal, social, systemic, environmental).',
         'Be bold: prefer the daring, memorable choice over the safe one. The only success metric is whether the episode is masterpiece-level engaging for the player.',
+        'Write beats as pressure the player must answer \u2014 confrontations, deadlines, temptations with costs \u2014 never events that resolve themselves off-screen.',
         'Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. Under 250 words. Output ONLY the director\'s note text, no preamble.',
     ].join('\n');
 
@@ -102,7 +103,7 @@
         profileId: '',
         recentFull: 8,
         fetchRounds: 3,
-        maxTokens: 2048,
+        maxTokens: 4096,
         historyDepth: 12,
         memoryKeyPattern: 'summar|ception|memory|qvink',
         allowUserEdits: false,
@@ -117,6 +118,7 @@
         critiqueDepth: 8,
         autoRehide: true,
         critiqueAuto: 0,
+        directorAuto: false,
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
     };
@@ -1464,7 +1466,7 @@
         return base + (extra.length ? '\n' + extra.join('\n') : '');
     }
 
-    async function generateDirective(mode) {
+    async function generateDirective(mode, isAuto) {
         if (running) return;
         running = true;
         setBusy(true);
@@ -1488,7 +1490,7 @@
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
             applyInjections();
-            const note = '\uD83C\uDFAC Directive set (episode ' + ep + '). Content hidden \u2014 just keep playing.';
+            const note = (isAuto ? '\uD83C\uDFAC Auto \u2014 directive set (episode ' : '\uD83C\uDFAC Directive set (episode ') + ep + '). Content hidden \u2014 just keep playing.';
             addBubble('note', note);
             pushHistory('note', note);
             updateSub();
@@ -1759,7 +1761,7 @@
             const md = c.chatMetadata || c.chat_metadata || {};
             const anKeys = ['note_prompt', 'note_interval', 'note_position', 'note_depth'];
             for (const [key, v] of Object.entries(md)) {
-                if (key === MODULE || anKeys.includes(key)) continue;
+                if (key === MODULE || anKeys.includes(key) || key === 'cc_critique') continue;
                 let text = typeof v === 'string' ? v : (() => { try { return JSON.stringify(v); } catch (e2) { return ''; } })();
                 text = String(text || '').trim();
                 if (!text || text === '{}' || text === '[]') continue;
@@ -1775,6 +1777,10 @@
         lines.push('MATCHED SOURCES (included in story memory):');
         lines.push(matched.length ? matched.map(s => '  - ' + s).join('\n') : '  (none)');
         if (settings.includeAuthorsNote) lines.push("  - Author's Note (included when set)");
+        try {
+            const mdC = c.chatMetadata || c.chat_metadata || {};
+            if (typeof mdC.cc_critique === 'string' && mdC.cc_critique.trim()) lines.push('  - Editor notes (cc_critique \u2014 included)');
+        } catch (e) { /* ignore */ }
         if (dupes.length) {
             lines.push('');
             lines.push('SKIPPED (injection duplicating the editable metadata source, saves tokens):');
@@ -1813,20 +1819,26 @@
             '<div id="cc_edits"></div>',
             '<div id="cc_composer">',
             '  <div id="cc_quick">',
-            '    <button class="cc_btn" id="cc_audit" title="Full continuity audit">Audit chat</button>',
-            '    <button class="cc_btn" id="cc_retry" title="Regenerate the last copilot reply">Retry</button>',
-            '    <button class="cc_btn" id="cc_dellast" title="Delete the last question + answer">Del last</button>',
-            '    <button class="cc_btn" id="cc_dirnew" title="Set or replace the secret episode directive">\uD83C\uDFAC New</button>',
-            '    <button class="cc_btn" id="cc_dirnext" title="Conclude this episode and direct the next">\uD83C\uDFAC Next</button>',
-            '    <button class="cc_btn" id="cc_diroff" title="Remove the directive">\uD83C\uDFAC Off</button>',
-            '    <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
-            '    <button class="cc_btn" id="cc_dirpeek" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek</button>',
-            '    <button class="cc_btn" id="cc_critique" title="Editor pass: generate/update standing craft notes for the storyteller">\uD83D\uDCDD Critique</button>',
-            '    <button class="cc_btn" id="cc_critpeek" title="View or hand-edit the critique">\uD83D\uDCDD Peek</button>',
-            '    <button class="cc_btn" id="cc_undo" title="Undo last applied batch">Undo</button>',
-            '    <button class="cc_btn" id="cc_memcheck" title="Show detected memory sources">Memory?</button>',
-            '    <button class="cc_btn" id="cc_context" title="Show the full context the copilot receives">Context</button>',
-            '    <button class="cc_btn" id="cc_clear" title="Clear copilot conversation">Clear</button>',
+            '    <div style="display:flex;gap:6px;flex-wrap:wrap;">',
+            '      <button class="cc_btn" id="cc_audit" title="Full continuity audit">Audit chat</button>',
+            '      <button class="cc_btn" id="cc_dirnew" title="Set or replace the secret episode directive">\uD83C\uDFAC New</button>',
+            '      <button class="cc_btn" id="cc_dirnext" title="Conclude this episode and direct the next">\uD83C\uDFAC Next</button>',
+            '      <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
+            '      <button class="cc_btn" id="cc_dirpeek" title="Reveal the directive (spoiler!)">\uD83C\uDFAC Peek</button>',
+            '      <button class="cc_btn" id="cc_diroff" title="Remove the directive">\uD83C\uDFAC Off</button>',
+            '    </div>',
+            '    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;">',
+            '      <button class="cc_btn" id="cc_critique" title="Editor pass: generate/update standing craft notes for the storyteller">\uD83D\uDCDD Critique</button>',
+            '      <button class="cc_btn" id="cc_critpeek" title="View or hand-edit the critique">\uD83D\uDCDD Peek</button>',
+            '      <button class="cc_btn" id="cc_memcheck" title="Show detected memory sources">Memory?</button>',
+            '      <button class="cc_btn" id="cc_context" title="Show the full context the copilot receives">Context</button>',
+            '    </div>',
+            '    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;">',
+            '      <button class="cc_btn" id="cc_retry" title="Regenerate the last copilot reply">Retry</button>',
+            '      <button class="cc_btn" id="cc_dellast" title="Delete the last question + answer">Del last</button>',
+            '      <button class="cc_btn" id="cc_undo" title="Undo last applied batch">Undo</button>',
+            '      <button class="cc_btn" id="cc_clear" title="Clear copilot conversation">Clear</button>',
+            '    </div>',
             '  </div>',
             '  <div id="cc_inputrow">',
             '    <textarea id="cc_input" placeholder="e.g. wait, why is Jillian on the train? she is at the academy — fix it"></textarea>',
@@ -1894,6 +1906,7 @@
     function buildSettingsUI() {
         const box = el('cc_settings');
         box.innerHTML = [
+            '<div style="margin:2px 0;font-weight:600;opacity:0.75;">Connection & generation</div>',
             '<label>LLM route (Connection Profile)</label>',
             '<select id="cc_profile"></select>',
             '<div class="cc_row">',
@@ -1909,6 +1922,7 @@
             '<div class="cc_check"><input type="checkbox" id="cc_hidden"><span>Full text previews for hidden/ghosted in index (token heavy; off = one-line stubs)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_rehide"><span>Auto re-hide pilot-hidden messages when a chat/branch loads</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_an"><span>Include Author\'s Note in story memory</span></div>',
+            '<div style="margin:10px 0 2px;font-weight:600;opacity:0.75;">Director & Editor</div>',
             '<div class="cc_row">',
             '  <div><label>Director intensity</label><select id="cc_dir_int"><option value="slow-burn">slow-burn</option><option value="standard">standard</option><option value="intense">intense</option></select></div>',
             '  <div><label>Director depth</label><input type="number" id="cc_dir_depth" min="0" max="20"></div>',
@@ -1918,8 +1932,10 @@
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
             '<label>Auto-critique: run the editor every N storyteller replies (0 = off; needs a Connection Profile)</label>',
             '<input type="number" id="cc_crit_auto" min="0" max="100">',
+            '<div class="cc_check"><input type="checkbox" id="cc_dir_auto"><span>Auto-director: keep a secret episode running (auto-starts E1, auto-chains Next on conclusion; needs a Connection Profile)</span></div>',
             '<label>Director system prompt (INTENSITY_LEVEL is replaced automatically)</label>',
             '<textarea id="cc_dir_prompt"></textarea>',
+            '<div style="margin:10px 0 2px;font-weight:600;opacity:0.75;">Prompts & shortcuts</div>',
             '<label>Shortcut commands (one per line: #tag = prompt)</label>',
             '<textarea id="cc_shortcuts"></textarea>',
             '<label>System prompt (USER_EDIT_RULE is replaced automatically)</label>',
@@ -1948,6 +1964,7 @@
         el('cc_crit_depth').value = settings.critiqueDepth;
         el('cc_dir_anchors').value = settings.directorAnchors || '';
         el('cc_crit_auto').value = settings.critiqueAuto;
+        el('cc_dir_auto').checked = !!settings.directorAuto;
         el('cc_dir_prompt').value = settings.directorPrompt || DEFAULT_DIRECTOR_PROMPT;
         el('cc_shortcuts').value = settings.shortcuts;
         el('cc_sysprompt').value = settings.systemPrompt;
@@ -1970,6 +1987,7 @@
             settings.critiqueDepth = Number(el('cc_crit_depth').value) || 8;
             settings.directorAnchors = el('cc_dir_anchors').value;
             settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
+            settings.directorAuto = el('cc_dir_auto').checked;
             settings.directorPrompt = el('cc_dir_prompt').value || DEFAULT_DIRECTOR_PROMPT;
             settings.shortcuts = el('cc_shortcuts').value;
             applyInjections();
@@ -2306,6 +2324,17 @@
         } catch (e) { console.warn(LOG, 'reconcile failed', e); }
     }
 
+    function maybeAutoDirector() {
+        try {
+            if (!settings.directorAuto) return;
+            if (running) return;
+            if (!settings.profileId) return;
+            const d = metaRoot().director;
+            if (!d) { generateDirective('new', true); return; }
+            if (d.concluded) generateDirective('next', true);
+        } catch (e) { /* ignore */ }
+    }
+
     function maybeAutoCritique() {
         try {
             const n = Number(settings.critiqueAuto) || 0;
@@ -2376,6 +2405,7 @@
                     const msg = ctx().chat?.[Number(i)];
                     if (!msg || msg.is_user || typeof msg.mes !== 'string') return;
                     maybeAutoCritique();
+                    maybeAutoDirector();
                     if (!msg.mes.includes('[EPISODE_END]')) return;
                     msg.mes = msg.mes.replace(/\s*\[EPISODE_END\]\s*$/, '').replace(/\[EPISODE_END\]/g, '').trim();
                     refreshMessage(Number(i));
@@ -2385,14 +2415,18 @@
                     d.concluded = true;
                     saveMeta();
                     updateSub();
-                    const note = '\uD83C\uDFAC Episode ' + d.episode + ' concluded \u2014 press \uD83C\uDFAC Next when ready.';
+                    const note = '\uD83C\uDFAC Episode ' + d.episode + ' concluded' + (settings.directorAuto ? ' \u2014 auto-directing the next episode.' : ' \u2014 press \uD83C\uDFAC Next when ready.');
                     toast(note, 'success');
                     addBubble('note', note);
                     pushHistory('note', note);
+                    maybeAutoDirector();
                 } catch (e2) { /* ignore */ }
             });
             if (c.event_types?.GENERATION_STARTED) {
                 c.eventSource.on(c.event_types.GENERATION_STARTED, () => { reconcileHidden(); });
+            }
+            if (c.event_types?.MESSAGE_SWIPED) {
+                c.eventSource.on(c.event_types.MESSAGE_SWIPED, () => { scrubEpisodeMarkers(); });
             }
         } catch (e) { /* ignore */ }
     }
