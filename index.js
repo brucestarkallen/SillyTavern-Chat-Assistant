@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.6.0';
+    const VERSION = '2.6.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1667,13 +1667,13 @@
                 + (prev?.text ? '\n\n[CURRENT DIRECTIVE]\n' + prev.text : '')
                 + '\n\n[PLAYER\'S DIRECTION INSTRUCTION]\n' + instruction
                 + '\n\nWrite the revised director\'s note now. Output ONLY the note text.';
-            const raw = await callLLM([
+            const sp = await callLLMSmart([
                 { role: 'system', content: directorAuthorPrompt('edit') },
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
-            const text = splitThinking(raw).rest.trim();
-            if (!text) throw new Error('empty directive');
+            const text = sp.rest.trim();
+            if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
             const ep = prev?.episode || 1;
             metaRoot().director = { text, episode: ep, ts: Date.now() };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
