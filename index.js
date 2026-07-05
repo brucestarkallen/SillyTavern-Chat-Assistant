@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.9.0';
+    const VERSION = '2.10.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -530,21 +530,64 @@
             if (!o || typeof o !== 'object') continue;
             const book = String(o.book || (wiChosenBooks()[0] || '')).trim();
             if (!book) continue;
+            void 0;
+            const hasContent = (o.replace !== undefined) || (o.replace_content !== undefined) || (o.content !== undefined);
             edits.push({
                 kind: 'wi', book,
                 uid: (o.uid === undefined || o.uid === null) ? null : Number(o.uid),
                 find: (o.find === undefined) ? null : String(o.find),
-                replace: o.replace !== undefined ? String(o.replace) : (o.replace_content !== undefined ? String(o.replace_content) : ''),
-                setKeys: Array.isArray(o.set_keys) ? o.set_keys.map(String) : null,
+                hasContent,
+                replace: o.replace !== undefined ? String(o.replace) : (o.replace_content !== undefined ? String(o.replace_content) : (o.content !== undefined ? String(o.content) : '')),
+                setKeys: Array.isArray(o.set_keys) ? o.set_keys.map(String) : (Array.isArray(o.keys) ? o.keys.map(String) : null),
+                setSecondaryKeys: Array.isArray(o.set_secondary_keys) ? o.set_secondary_keys.map(String) : (Array.isArray(o.keysecondary) ? o.keysecondary.map(String) : null),
                 newEntry: !!o.new_entry,
                 comment: o.comment !== undefined ? String(o.comment) : null,
+                status_type: o.status !== undefined && ['normal','constant','vectorized'].includes(String(o.status)) ? String(o.status) : null,
                 constant: o.constant,
                 disable: o.disable,
+                position: o.position !== undefined ? o.position : null,
+                depth: o.depth !== undefined ? o.depth : null,
+                order: o.order !== undefined ? Number(o.order) : null,
+                probability: o.trigger !== undefined ? Number(o.trigger) : (o.probability !== undefined ? Number(o.probability) : null),
+                role: o.role !== undefined ? o.role : null,
                 reason: o.reason ? String(o.reason) : '',
-                status: 'pending',
+                editStatus: 'pending',
             });
         }
         return { edits };
+    }
+
+    // status: 'constant' (\uD83D\uDD35 blue always-on) | 'normal' (\uD83D\uDFE2 green keyword) | 'vectorized' (\uD83D\uDD17 chain)
+    function applyWiStatus(entry, statusType) {
+        if (statusType === 'constant') { entry.constant = true; entry.vectorized = false; }
+        else if (statusType === 'vectorized') { entry.constant = false; entry.vectorized = true; }
+        else if (statusType === 'normal') { entry.constant = false; entry.vectorized = false; }
+    }
+    // position: accept named ('before_char'|'after_char'|'an_top'|'an_bottom'|'at_depth') or raw number.
+    const WI_POS = { before_char: 0, after_char: 1, an_top: 2, an_bottom: 3, at_depth: 4 };
+    function applyWiPosition(entry, pos, depth) {
+        if (pos !== null && pos !== undefined) {
+            if (typeof pos === 'number') entry.position = pos;
+            else if (WI_POS[String(pos)] !== undefined) entry.position = WI_POS[String(pos)];
+        }
+        if (depth !== null && depth !== undefined && depth !== '') {
+            const d = Number(depth);
+            if (Number.isFinite(d)) entry.depth = d;
+        }
+    }
+    function applyWiFields(entry, edit) {
+        if (edit.comment !== null && edit.comment !== undefined) entry.comment = edit.comment;
+        if (edit.setKeys) entry.key = edit.setKeys;
+        if (edit.setSecondaryKeys) entry.keysecondary = edit.setSecondaryKeys;
+        if (edit.status_type) applyWiStatus(entry, edit.status_type);
+        if (edit.constant !== undefined && edit.constant !== null) entry.constant = !!edit.constant;
+        if (edit.disable !== undefined && edit.disable !== null) entry.disable = !!edit.disable;
+        applyWiPosition(entry, edit.position, edit.depth);
+        if (edit.order !== null && edit.order !== undefined && Number.isFinite(edit.order)) entry.order = edit.order;
+        if (edit.probability !== null && edit.probability !== undefined && Number.isFinite(edit.probability)) {
+            entry.probability = edit.probability; entry.useProbability = true;
+        }
+        if (edit.role !== null && edit.role !== undefined) entry.role = edit.role;
     }
 
     async function applyWiOne(edit) {
@@ -555,25 +598,23 @@
             let maxUid = -1;
             for (const e of wiEntryList(data)) maxUid = Math.max(maxUid, Number(e.uid));
             const uid = maxUid + 1;
-            data.entries[String(uid)] = {
-                uid, key: edit.setKeys || [], keysecondary: [], comment: edit.comment || 'New entry',
-                content: edit.replace || '', constant: !!edit.constant, vectorized: false, selective: true,
-                order: 100, position: 0, disable: !!edit.disable, addMemo: true, excludeRecursion: false,
+            const entry = {
+                uid, key: [], keysecondary: [], comment: 'New entry',
+                content: '', constant: false, vectorized: false, selective: true,
+                order: 100, position: 0, disable: false, addMemo: true, excludeRecursion: false,
                 probability: 100, useProbability: true, group: '', groupOverride: false, scanDepth: null,
-                caseSensitive: null, matchWholeWords: null, automationId: '', role: null, sticky: 0, cooldown: 0, delay: 0,
+                caseSensitive: null, matchWholeWords: null, automationId: '', role: null, sticky: 0, cooldown: 0, delay: 0, depth: 4,
             };
+            if (edit.hasContent) entry.content = edit.replace || '';
+            applyWiFields(entry, edit);
+            data.entries[String(uid)] = entry;
             const ok = await wiSave(edit.book, data);
             return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + uid + ' (new)' } : { ok: false, reason: 'save failed' };
         }
         const entry = wiEntryList(data).find(e => Number(e.uid) === edit.uid);
         if (!entry) return { ok: false, reason: 'entry uid ' + edit.uid + ' not found in ' + edit.book };
-        const metaOnly = (edit.setKeys || edit.disable !== undefined || edit.constant !== undefined) && edit.find === null && (edit.replace === '' || edit.replace === undefined || edit.replace === null);
-        if (edit.setKeys) entry.key = edit.setKeys;
-        if (edit.disable !== undefined) entry.disable = !!edit.disable;
-        if (edit.constant !== undefined) entry.constant = !!edit.constant;
-        if (metaOnly) {
-            // keys/flags only \u2014 leave content untouched
-        } else if (edit.find === null) {
+        // content edit only when explicitly provided
+        if (edit.hasContent && edit.find === null) {
             entry.content = edit.replace;
         } else if (edit.find !== null) {
             const cur = String(entry.content || '');
@@ -582,6 +623,7 @@
             if (cnt > 1) return { ok: false, reason: 'find matches ' + cnt + ' places \u2014 use a longer unique excerpt' };
             entry.content = cur.replace(edit.find, edit.replace);
         }
+        applyWiFields(entry, edit);
         const ok = await wiSave(edit.book, data);
         return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + edit.uid } : { ok: false, reason: 'save failed' };
     }
@@ -718,8 +760,14 @@
         '{"book":"Name","uid":3,"find":"verbatim excerpt","replace":"new text","reason":".."} \u2014 targeted edit; find must be unique in that entry.',
         '{"book":"Name","uid":3,"replace_content":"entire new entry text","reason":".."} \u2014 whole-entry replace.',
         '{"book":"Name","uid":3,"set_keys":["a","b"],"reason":".."} \u2014 update trigger keywords.',
-        '{"book":"Name","new_entry":true,"comment":"Title","keys":["k"],"content":"..","constant":false,"reason":".."} \u2014 add an entry.',
-        'Only edit the Worldbook when asked or when fixing a real continuity error. Keep [WORLDBOOK] and [STORY MEMORY] consistent with each other.',
+        '{"book":"Name","new_entry":true,"comment":"Title","keys":["k"],"content":"..","status":"normal","reason":".."} \u2014 add an entry.',
+        'You can also set entry CONFIG (include only the fields you want to change):',
+        '  "comment":"new title" \u2014 rename the entry.',
+        '  "status":"constant"|"normal"|"vectorized" \u2014 constant=\uD83D\uDD35 always-on; normal=\uD83D\uDFE2 keyword-triggered; vectorized=\uD83D\uDD17 semantic/keyless.',
+        '  "position":"before_char"|"after_char"|"an_top"|"an_bottom"|"at_depth", plus "depth":N when position is at_depth.',
+        '  "order":N (insertion priority, higher = later/stronger), "trigger":N (activation probability %, 0-100).',
+        '  "set_keys":[..] primary keywords, "set_secondary_keys":[..], "disable":true/false.',
+        'Only edit the Worldbook when asked or when fixing a real continuity error. Keep [WORLDBOOK] and [STORY MEMORY] consistent with each other. Change config fields only when the user asks or an entry is clearly misconfigured (e.g. lore that should be always-on is keyword-gated).',
     ].join('\n');
 
     function sysPrompt() {
@@ -1321,7 +1369,8 @@
         const keyBackups = new Map();
         const wiBackups = new Map();
         for (const edit of list) {
-            if (edit.status !== 'pending') continue;
+            const st = edit.kind === 'wi' ? edit.editStatus : edit.status;
+            if (st !== 'pending') continue;
             if (edit.kind === 'mem') {
                 const res = applyMemOne(edit, keyBackups);
                 if (res.ok) {
@@ -1333,10 +1382,10 @@
             } else if (edit.kind === 'wi') {
                 const res = await applyWiOne(edit);
                 if (res.ok) {
-                    edit.status = 'applied \u2192 WB ' + res.path;
+                    edit.editStatus = 'applied \u2192 WB ' + res.path;
                     if (!wiBackups.has(res.book)) wiBackups.set(res.book, res.before);
                 } else {
-                    edit.status = 'failed: ' + res.reason;
+                    edit.editStatus = 'failed: ' + res.reason;
                 }
             } else {
                 const res = await applyOne(edit);
@@ -2662,6 +2711,7 @@
         return n > 1 ? ('Batch ' + n) : 'Proposed';
     }
 
+    let findShown2Cfg = '';
     function renderEditCards() {
         const box = el('cc_edits');
         if (!box) return;
@@ -2709,15 +2759,28 @@
                 : edit.find == null
                     ? (isMem ? '(replace entire field: ' + (edit.path || '?') + ')' : '(replace entire message)')
                     : edit.find;
+            if (isWi) {
+                const cfg = [];
+                if (edit.status_type) cfg.push('status=' + edit.status_type);
+                if (edit.comment !== null && edit.comment !== undefined) cfg.push('title="' + edit.comment + '"');
+                if (edit.position !== null) cfg.push('pos=' + edit.position);
+                if (edit.depth !== null) cfg.push('depth=' + edit.depth);
+                if (edit.order !== null) cfg.push('order=' + edit.order);
+                if (edit.probability !== null) cfg.push('trigger=' + edit.probability + '%');
+                if (edit.setSecondaryKeys) cfg.push('2nd-keys');
+                if (edit.disable !== undefined && edit.disable !== null) cfg.push(edit.disable ? 'DISABLE' : 'ENABLE');
+                if (cfg.length) { findShown2Cfg = cfg.join(' \u00b7 '); }
+            }
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b><span>' + esc(edit.reason || '') + '</span>' +
-                (edit.status === 'pending'
+                (edit.editStatus === 'pending'
                     ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button><button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +
                 '</div>' +
-                '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' +
-                '<div class="cc_diff cc_after">' + esc(edit.replace) + '</div>' +
-                (edit.status !== 'pending' ? '<div class="cc_card_status">' + esc(edit.status) + '</div>' : '');
+                (isWi && findShown2Cfg ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(findShown2Cfg) + '</div>' : '') +
+                ((isWi && !edit.hasContent && edit.find === null) ? '' : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
+                (edit.editStatus !== 'pending' ? '<div class="cc_card_status">' + esc(edit.editStatus) + '</div>' : '');
+            findShown2Cfg = '';
             list.appendChild(card);
         });
 
@@ -2744,7 +2807,8 @@
         box.querySelectorAll('[data-cc-skip]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const i = Number(btn.getAttribute('data-cc-skip'));
-                pendingEdits[i].status = 'skipped';
+                if (pendingEdits[i].kind === 'wi') pendingEdits[i].editStatus = 'skipped';
+                else pendingEdits[i].status = 'skipped';
                 renderEditCards();
             });
         });
