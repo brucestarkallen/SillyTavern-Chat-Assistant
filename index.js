@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.12.1';
+    const VERSION = '2.12.2';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1498,6 +1498,7 @@
     async function applyEdits(list) {
         const chatApplied = [];
         const memPaths = [];
+        const wiApplied = [];
         const keyBackups = new Map();
         const wiBackups = new Map();
         for (const edit of list) {
@@ -1515,6 +1516,7 @@
                 const res = await applyWiOne(edit);
                 if (res.ok) {
                     edit.editStatus = 'applied \u2192 WB ' + res.path;
+                    wiApplied.push(res.path);
                     if (!wiBackups.has(res.book)) wiBackups.set(res.book, res.before);
                 } else {
                     edit.editStatus = 'failed: ' + res.reason;
@@ -1536,13 +1538,25 @@
             const labelParts = [];
             if (chatApplied.length) labelParts.push(chatApplied.map(a => '#' + a.id).join(', '));
             if (memPaths.length) labelParts.push('memory: ' + memPaths.join(', '));
+            if (wiApplied.length) labelParts.push('worldbook: ' + wiApplied.join(', '));
             undoStack.push({ label: labelParts.join(' + '), items });
             if (chatApplied.length) await commitChanges(chatApplied.map(a => a.id));
             if (memPaths.length) { saveMeta(); applyCritiqueInjection(); }
-            const note = 'Applied ' + (chatApplied.length + memPaths.length) + ' edit(s): ' + labelParts.join(' + ') + '.' + (memPaths.length ? ' Memory updated \u2014 Summaryception uses it from the next generation.' : '');
+            const total = chatApplied.length + memPaths.length + wiApplied.length;
+            const note = 'Applied ' + total + ' edit(s): ' + labelParts.join(' + ') + '.' + (memPaths.length ? ' Memory updated \u2014 Summaryception uses it from the next generation.' : '') + (wiApplied.length ? ' Worldbook saved.' : '');
             addBubble('note', note);
             pushHistory('note', note);
             toast(note, 'success');
+        }
+        else {
+            // Nothing was applied \u2014 tell the user why instead of silently doing nothing.
+            const anyPending = list.some(e => (e.kind === 'wi' ? e.editStatus : e.status) === 'pending');
+            const anyFailed = list.some(e => String(e.kind === 'wi' ? e.editStatus : e.status).startsWith('failed'));
+            if (!anyPending && anyFailed) {
+                addBubble('note', 'No edits applied \u2014 the proposed change(s) failed (likely the target text changed, or a stale card). Ask the copilot to re-propose against the current text.');
+            } else if (!list.length) {
+                addBubble('note', 'No pending edits to apply.');
+            }
         }
         renderEditCards();
     }
