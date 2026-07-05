@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.11.2';
+    const VERSION = '2.11.3';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -481,25 +481,29 @@
         else lines.push('\nCould not auto-detect. Open ST\'s World Info panel, copy the exact book name shown in the selector, and paste it into Settings \u2192 Worldbook. (Detection can fail on some ST builds \u2014 typing the name manually always works.)');
         // Raw inspection \u2014 dump what actually exists so detection can be fixed with facts.
         try {
+            const pc = ctx();
             const W = (typeof window !== 'undefined') ? window : {};
             const probes = [];
-            const note = (label, v) => {
+            const safe = (fn) => { try { return fn(); } catch (e) { return '<err>'; } };
+            const note = (label, getter) => {
+                const v = safe(getter);
+                if (v === '<err>') { probes.push(label + ' = <inaccessible>'); return; }
                 if (v === undefined) { probes.push(label + ' = undefined'); return; }
-                if (Array.isArray(v)) { probes.push(label + ' = [' + v.map(x => typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 8).join(', ') + ']'); return; }
-                if (v && typeof v === 'object') { probes.push(label + ' = {' + Object.keys(v).slice(0, 12).join(', ') + '}'); return; }
+                if (v === null) { probes.push(label + ' = null'); return; }
+                if (Array.isArray(v)) { probes.push(label + ' = [' + v.map(x => typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 10).join(', ') + ']'); return; }
+                if (typeof v === 'object') { probes.push(label + ' = {' + Object.keys(v).slice(0, 14).join(', ') + '}'); return; }
                 probes.push(label + ' = ' + String(v));
             };
-            note('ctx.world_names', c.world_names);
-            note('win.world_names', W.world_names);
-            note('ctx.selected_world_info', c.selected_world_info);
-            note('win.selected_world_info', W.selected_world_info);
-            note('ctx.world_info', c.world_info);
-            note('win.world_info', W.world_info);
-            const st = c.extensionSettings || c.extension_settings || W.extension_settings;
-            note('extensionSettings keys', st);
-            if (st) { note('  .world_info', st.world_info); note('  .world_names', st.world_names); }
-            const pu = c.powerUserSettings || W.power_user;
-            note('power_user.world_info', pu && pu.world_info);
+            note('ctx.world_names', () => pc.world_names);
+            note('win.world_names', () => W.world_names);
+            note('ctx.selected_world_info', () => pc.selected_world_info);
+            note('win.selected_world_info', () => W.selected_world_info);
+            note('ctx.world_info', () => pc.world_info);
+            note('win.world_info', () => W.world_info);
+            const st = safe(() => pc.extensionSettings || pc.extension_settings || W.extension_settings);
+            note('extensionSettings keys', () => st);
+            if (st && typeof st === 'object') { note('  extSettings.world_info', () => st.world_info); note('  extSettings.world_names', () => st.world_names); }
+            note('power_user.world_info', () => (pc.powerUserSettings || W.power_user || {}).world_info);
             const diag = '\uD83D\uDD0E Raw WI probe (screenshot this):\n' + probes.join('\n');
             addBubble('note', diag);
             pushHistory('note', diag);
