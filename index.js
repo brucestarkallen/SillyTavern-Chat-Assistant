@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.5.0';
+    const VERSION = '2.6.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1159,12 +1159,29 @@
 
     function splitThinking(text) {
         let think = '';
-        const rest = String(text || '').replace(/<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/gi, (m0, tag, body) => {
+        let rest = String(text || '').replace(/<(think|thinking|reasoning)>([\s\S]*?)<\/\1>/gi, (m0, tag, body) => {
             const b = String(body).trim();
             if (b) think += (think ? '\n\n' : '') + b;
             return '';
-        }).trim();
-        return { think, rest };
+        });
+        rest = rest.replace(/<(think|thinking|reasoning)>([\s\S]*)$/i, (m0, tag, body) => {
+            const b = String(body).trim();
+            if (b) think += (think ? '\n\n' : '') + b;
+            return '';
+        });
+        return { think, rest: rest.trim() };
+    }
+
+    async function callLLMSmart(messages, onPartial) {
+        let raw = await callLLM(messages, onPartial);
+        let sp = splitThinking(raw);
+        if (!stopRequested && !sp.rest && sp.think) {
+            addBubble('note', '\u26A0 Answer was consumed by thinking \u2014 auto-retrying with a directness nudge\u2026');
+            const retryMsgs = [...messages, { role: 'user', content: '[SYSTEM] Your previous attempt was consumed entirely by internal reasoning and produced no visible answer. Respond again now with MINIMAL deliberation: go straight to the final answer and required blocks.' }];
+            raw = await callLLM(retryMsgs, onPartial);
+            sp = splitThinking(raw);
+        }
+        return sp;
     }
 
     function parseShortcuts() {
@@ -1264,8 +1281,7 @@
             const fetchedIds = new Set();
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
-                const raw = await callLLM(messages, live);
-                const split = splitThinking(raw);
+                const split = await callLLMSmart(messages, live);
                 reply = split.rest;
                 think = split.think;
                 if (stopRequested) {
@@ -1318,6 +1334,11 @@
                 const warn = '\u26A0 Ran out of fetch rounds while the copilot was still requesting messages \u2014 the answer may be incomplete. Raise "Fetch rounds" in settings, or narrow the request (e.g. one snippet/layer at a time).';
                 addBubble('note', warn);
                 pushHistory('note', warn);
+            }
+            if (!reply && think && !stopRequested) {
+                const twarn2 = '\u26A0 The model spent its entire output budget on thinking and produced no answer, even after an automatic retry. Raise "Max output tokens" in settings, lower the reasoning effort in this Connection Profile\'s preset, or narrow the request. The thinking is preserved above so the tokens were not wasted.';
+                addBubble('note', twarn2);
+                pushHistory('note', twarn2);
             }
             if (looksTruncated(reply, 'edits') || looksTruncated(reply, 'memedits')) {
                 const twarn = '\u26A0 The reply looks cut off mid-edit block (response budget too small). Raise "Max output tokens" toward your provider\'s output limit, or tell the copilot to split the change into several smaller edits.';
@@ -1529,13 +1550,13 @@
                 'Write numbered standing corrections \u2014 as many as the story genuinely needs, no maximum. Each must be actionable and general enough to keep applying (e.g. "Track every named character present in a scene until they visibly exit"). Carry forward still-relevant items from [CURRENT NOTES] if provided. Optimize for perfection, immersion, engagement, and realism \u2014 while staying token-efficient: no padding, no repetition, no filler; every line must earn its place. Output ONLY the notes.',
             ].join('\n');
             const user = buildContextBlock() + (cur ? '\n\n[CURRENT NOTES]\n' + cur : '') + '\n\nWrite the standing notes now.';
-            const raw = await callLLM([
+            const sp = await callLLMSmart([
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 critique unchanged.'); return; }
-            const text = splitThinking(raw).rest.trim();
-            if (!text) throw new Error('empty critique');
+            const text = sp.rest.trim();
+            if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty critique');
             md.cc_critique = text;
             undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur }] });
             saveMeta();
@@ -1596,13 +1617,13 @@
             const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '')
                 + (mode === 'next' && prev?.text ? '\n\n[PREVIOUS EPISODE DIRECTIVE \u2014 concluded]\n' + prev.text : '')
                 + '\n\nWrite the director\'s note now.';
-            const raw = await callLLM([
+            const sp = await callLLMSmart([
                 { role: 'system', content: directorAuthorPrompt(mode) },
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
-            const text = splitThinking(raw).rest.trim();
-            if (!text) throw new Error('empty directive');
+            const text = sp.rest.trim();
+            if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
             const ep = mode === 'next'
                 ? (Math.max(Number(prev?.episode) || 0, Number(metaRoot().directorEp) || 0) + 1)
                 : (Number(prev?.episode) || 1);
@@ -1685,12 +1706,12 @@
         try {
             const sys = 'You are checking secret episode progress for a roleplay director. You receive the SECRET DIRECTIVE and the story context. Judge whether the episode\'s LANDING has been reached based only on actual narrated story events; ignore any literal [EPISODE_END] marker text. Reply with EXACTLY one line, spoiler-free, in one of these formats: "ONGOING \u2014 <short vague progress hint, no spoilers>" or "CONCLUDED \u2014 <short line>" or "DERAILED \u2014 <short line>". Never quote or reveal the directive contents.';
             const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '') + '\n\n[SECRET DIRECTIVE]\n' + d.text + '\n\nJudge the progress now.';
-            const raw = await callLLM([
+            const sp = await callLLMSmart([
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped.'); return; }
-            const line = splitThinking(raw).rest.trim().split('\n')[0].slice(0, 200);
+            const line = (sp.rest.trim().split('\n')[0] || (sp.think ? 'UNKNOWN \u2014 answer consumed by thinking; raise Max output tokens' : '')).slice(0, 200);
             addBubble('note', '\uD83C\uDFAC ' + line);
             pushHistory('note', '\uD83C\uDFAC ' + line);
             if (/^CONCLUDED/i.test(line)) {
@@ -2658,20 +2679,20 @@
                 'Rules: qualitative continuity ONLY \u2014 never numeric stats (P/R/S etc.). Only characters actually present or affected in the new messages. Knowledge entries are short factual phrases. Use existing canonical names/aliases; never invent duplicates for the same person. Only record real changes; an empty array [] is a valid answer.',
             ].join('\n');
             const user = '[CURRENT LEDGER]\n' + JSON.stringify(L) + '\n\n[NEW MESSAGES]\n' + input + '\n\nEmit the ledgerops block now.';
-            let raw = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: user }]);
+            let sp = await callLLMSmart([{ role: 'system', content: sys }, { role: 'user', content: user }]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 ledger unchanged.'); return; }
-            let b = findBlock(splitThinking(raw).rest, 'ledgerops');
+            let b = findBlock(sp.rest, 'ledgerops');
             let ops = null;
             try { ops = b ? JSON.parse(b.inner.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '')) : null; } catch (e) { ops = null; }
             if (!Array.isArray(ops)) {
-                raw = await callLLM([
+                sp = await callLLMSmart([
                     { role: 'system', content: sys },
                     { role: 'user', content: user },
-                    { role: 'assistant', content: splitThinking(raw).rest.slice(0, 4000) },
-                    { role: 'user', content: 'That was not a valid ledgerops JSON array. Resend ONLY the <ledgerops>[...]</ledgerops> block with valid JSON.' },
+                    { role: 'assistant', content: sp.rest.slice(0, 4000) || '(no answer \u2014 all reasoning)' },
+                    { role: 'user', content: 'That was not a valid ledgerops JSON array. Resend ONLY the <ledgerops>[...]</ledgerops> block with valid JSON, with minimal deliberation.' },
                 ]);
                 if (stopRequested) { addBubble('note', 'Stopped \u2014 ledger unchanged.'); return; }
-                b = findBlock(splitThinking(raw).rest, 'ledgerops');
+                b = findBlock(sp.rest, 'ledgerops');
                 try { ops = b ? JSON.parse(b.inner.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '')) : null; } catch (e) { ops = null; }
             }
             if (!Array.isArray(ops)) { toast('\uD83E\uDDEC Ledger update failed to parse \u2014 ledger unchanged.', 'error'); addBubble('note', '\uD83E\uDDEC Ledger update failed to parse twice \u2014 unchanged.'); return; }
