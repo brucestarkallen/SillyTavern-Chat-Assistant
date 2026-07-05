@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.11.4';
+    const VERSION = '2.12.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -644,6 +644,7 @@
                 setKeys: Array.isArray(o.set_keys) ? o.set_keys.map(String) : (Array.isArray(o.keys) ? o.keys.map(String) : null),
                 setSecondaryKeys: Array.isArray(o.set_secondary_keys) ? o.set_secondary_keys.map(String) : (Array.isArray(o.keysecondary) ? o.keysecondary.map(String) : null),
                 newEntry: !!o.new_entry,
+                deleteEntry: !!(o.delete_entry || o.delete),
                 comment: o.comment !== undefined ? String(o.comment) : null,
                 status_type: o.status !== undefined && ['normal','constant','vectorized'].includes(String(o.status)) ? String(o.status) : null,
                 constant: o.constant,
@@ -697,6 +698,18 @@
         const data = await wiLoad(edit.book);
         if (!data) return { ok: false, reason: 'book "' + edit.book + '" not found' };
         const before = JSON.parse(JSON.stringify(data));
+        if (edit.deleteEntry) {
+            if (edit.uid === null || edit.uid === undefined) return { ok: false, reason: 'delete needs a uid' };
+            let foundKey = null;
+            for (const [k, e] of Object.entries(data.entries)) {
+                if (Number(e.uid) === Number(edit.uid)) { foundKey = k; break; }
+            }
+            if (foundKey === null) return { ok: false, reason: 'entry uid ' + edit.uid + ' not found in ' + edit.book };
+            const title = String(data.entries[foundKey].comment || '').trim() || '(untitled)';
+            delete data.entries[foundKey];
+            const ok = await wiSave(edit.book, data);
+            return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + edit.uid + ' DELETED "' + title + '"' } : { ok: false, reason: 'save failed' };
+        }
         if (edit.newEntry) {
             let maxUid = -1;
             for (const e of wiEntryList(data)) maxUid = Math.max(maxUid, Number(e.uid));
@@ -864,6 +877,7 @@
         '{"book":"Name","uid":3,"replace_content":"entire new entry text","reason":".."} \u2014 whole-entry replace.',
         '{"book":"Name","uid":3,"set_keys":["a","b"],"reason":".."} \u2014 update trigger keywords.',
         '{"book":"Name","new_entry":true,"comment":"Title","keys":["k"],"content":"..","status":"normal","reason":".."} \u2014 add an entry.',
+        '{"book":"Name","uid":3,"delete_entry":true,"reason":".."} \u2014 permanently remove an entry (reversible via Undo). Use only when the user asks to delete, or an entry is a genuine duplicate/obsolete \u2014 never delete lore just to tidy.',
         'You can also set entry CONFIG (include only the fields you want to change):',
         '  "comment":"new title" \u2014 rename the entry (organizational label only; NOT sent to the story).',
         '  "status":"constant"|"normal"|"vectorized".',
@@ -2860,7 +2874,7 @@
             const isWi = edit.kind === 'wi';
             const msg = (isMem || isWi) ? null : chat[edit.id];
             const who = (isMem || isWi) ? '' : (msg ? (msg.is_user ? 'USER' : (msg.name || 'AI')) : '?');
-            const label = isWi ? ('\uD83C\uDF10 WB ' + esc(edit.book + '#' + (edit.newEntry ? 'new' : edit.uid))) : (isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who)));
+            const label = isWi ? ('\uD83C\uDF10 WB ' + esc(edit.book + '#' + (edit.newEntry ? 'new' : (edit.deleteEntry ? ('DELETE ' + edit.uid) : edit.uid)))) : (isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who)));
             if (maxBatch > 1 && (edit.batch || 1) !== lastBatch) {
                 lastBatch = edit.batch || 1;
                 const div = document.createElement('div');
@@ -2871,7 +2885,7 @@
             const card = document.createElement('div');
             card.className = 'cc_card';
             const findShown = isWi
-                ? (edit.newEntry ? '(new entry: ' + (edit.comment || '') + ')' : (edit.setKeys ? '(set keys: ' + edit.setKeys.join(', ') + ')' : (edit.find == null ? '(replace entry content)' : edit.find)))
+                ? (edit.deleteEntry ? '\u26A0 DELETE this entry permanently (Undo restores it)' : (edit.newEntry ? '(new entry: ' + (edit.comment || '') + ')' : (edit.setKeys ? '(set keys: ' + edit.setKeys.join(', ') + ')' : (edit.find == null ? '(replace entry content)' : edit.find))))
                 : (!isMem && edit.hide !== null && edit.hide !== undefined)
                 ? (edit.hide ? '(hide message from AI context \u2014 text stays in log)' : '(unhide message)')
                 : edit.find == null
@@ -2896,7 +2910,7 @@
                     : '') +
                 '</div>' +
                 (isWi && findShown2Cfg ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(findShown2Cfg) + '</div>' : '') +
-                ((isWi && !edit.hasContent && edit.find === null) ? '' : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
+                ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
                 (edit.editStatus !== 'pending' ? '<div class="cc_card_status">' + esc(edit.editStatus) + '</div>' : '');
             findShown2Cfg = '';
             list.appendChild(card);
