@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.14.0';
+    const VERSION = '2.14.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2908,7 +2908,6 @@
         return n > 1 ? ('Batch ' + n) : 'Proposed';
     }
 
-    let findShown2Cfg = '';
     function renderEditCards() {
         const box = el('cc_edits');
         if (!box) return;
@@ -2939,7 +2938,7 @@
             const isWi = edit.kind === 'wi';
             const msg = (isMem || isWi) ? null : chat[edit.id];
             const who = (isMem || isWi) ? '' : (msg ? (msg.is_user ? 'USER' : (msg.name || 'AI')) : '?');
-            let label, wiDetail = '';
+            let label, wiDetail = '', cfgStr = '';
             if (isWi) {
                 const act = edit.createBook ? '\uD83D\uDCD5 CREATE BOOK' : (edit.deleteEntry ? ('\uD83D\uDDD1 delete #' + edit.uid) : (edit.newEntry ? 'new entry' : ('edit #' + edit.uid)));
                 label = '\uD83C\uDF10 ' + esc(act);
@@ -2973,7 +2972,7 @@
                 if (edit.probability !== null) cfg.push('trigger=' + edit.probability + '%');
                 if (edit.setSecondaryKeys) cfg.push('2nd-keys');
                 if (edit.disable !== undefined && edit.disable !== null) cfg.push(edit.disable ? 'DISABLE' : 'ENABLE');
-                if (cfg.length) { findShown2Cfg = cfg.join(' \u00b7 '); }
+                if (cfg.length) { cfgStr = cfg.join(' \u00b7 '); }
             }
             const st = isWi ? edit.editStatus : edit.status;
             // Which cards support inline replacement-text editing: anything with a replace/content payload.
@@ -2984,11 +2983,10 @@
                     ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button>' + (canEditText ? '<button class="cc_btn" data-cc-editcard="' + idx + '" title="Hand-edit the new text before applying">\u270E</button>' : '') + '<button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +
                 '</div>' +
-                (isWi && findShown2Cfg ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(findShown2Cfg) + '</div>' : '') +
+                (isWi && cfgStr ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(cfgStr) + '</div>' : '') +
                 ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
                 (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
                 (st !== 'pending' ? '<div class="cc_card_status">' + esc(st) + '</div>' : '');
-            findShown2Cfg = '';
             list.appendChild(card);
         });
 
