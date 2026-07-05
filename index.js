@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.11.1';
+    const VERSION = '2.11.2';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -479,6 +479,31 @@
         if (suggestions.length) lines.push('\nSuggested to manage: ' + suggestions.join(', ') + '  (put these in Settings \u2192 Worldbook \u2192 book names)');
         else if (d.all.length) lines.push('\nCould not read the ACTIVE selection on this ST build, but these books exist \u2014 copy the one you want into Settings \u2192 Worldbook: ' + d.all.join(', '));
         else lines.push('\nCould not auto-detect. Open ST\'s World Info panel, copy the exact book name shown in the selector, and paste it into Settings \u2192 Worldbook. (Detection can fail on some ST builds \u2014 typing the name manually always works.)');
+        // Raw inspection \u2014 dump what actually exists so detection can be fixed with facts.
+        try {
+            const W = (typeof window !== 'undefined') ? window : {};
+            const probes = [];
+            const note = (label, v) => {
+                if (v === undefined) { probes.push(label + ' = undefined'); return; }
+                if (Array.isArray(v)) { probes.push(label + ' = [' + v.map(x => typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 8).join(', ') + ']'); return; }
+                if (v && typeof v === 'object') { probes.push(label + ' = {' + Object.keys(v).slice(0, 12).join(', ') + '}'); return; }
+                probes.push(label + ' = ' + String(v));
+            };
+            note('ctx.world_names', c.world_names);
+            note('win.world_names', W.world_names);
+            note('ctx.selected_world_info', c.selected_world_info);
+            note('win.selected_world_info', W.selected_world_info);
+            note('ctx.world_info', c.world_info);
+            note('win.world_info', W.world_info);
+            const st = c.extensionSettings || c.extension_settings || W.extension_settings;
+            note('extensionSettings keys', st);
+            if (st) { note('  .world_info', st.world_info); note('  .world_names', st.world_names); }
+            const pu = c.powerUserSettings || W.power_user;
+            note('power_user.world_info', pu && pu.world_info);
+            const diag = '\uD83D\uDD0E Raw WI probe (screenshot this):\n' + probes.join('\n');
+            addBubble('note', diag);
+            pushHistory('note', diag);
+        } catch (e) { addBubble('note', 'probe error: ' + (e && e.message)); }
         // Verify the chosen book(s) actually load, since that is what matters for editing.
         const chosen = wiChosenBooks();
         if (chosen.length) {
