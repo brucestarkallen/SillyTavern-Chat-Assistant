@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.12.2';
+    const VERSION = '2.13.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2924,15 +2924,19 @@
                 if (edit.disable !== undefined && edit.disable !== null) cfg.push(edit.disable ? 'DISABLE' : 'ENABLE');
                 if (cfg.length) { findShown2Cfg = cfg.join(' \u00b7 '); }
             }
+            const st = isWi ? edit.editStatus : edit.status;
+            // Which cards support inline replacement-text editing: anything with a replace/content payload.
+            const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined);
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b><span>' + (wiDetail ? '<i style="opacity:0.85;">' + wiDetail + '</i> \u00b7 ' : '') + esc(edit.reason || '') + '</span>' +
-                (edit.editStatus === 'pending'
-                    ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button><button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
+                (st === 'pending'
+                    ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button>' + (canEditText ? '<button class="cc_btn" data-cc-editcard="' + idx + '" title="Hand-edit the new text before applying">\u270E</button>' : '') + '<button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +
                 '</div>' +
                 (isWi && findShown2Cfg ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(findShown2Cfg) + '</div>' : '') +
                 ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
-                (edit.editStatus !== 'pending' ? '<div class="cc_card_status">' + esc(edit.editStatus) + '</div>' : '');
+                (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
+                (st !== 'pending' ? '<div class="cc_card_status">' + esc(st) + '</div>' : '');
             findShown2Cfg = '';
             list.appendChild(card);
         });
@@ -2955,6 +2959,21 @@
             btn.addEventListener('click', () => {
                 const i = Number(btn.getAttribute('data-cc-apply'));
                 applyEdits([pendingEdits[i]]);
+            });
+        });
+        box.querySelectorAll('[data-cc-editcard]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const i = Number(btn.getAttribute('data-cc-editcard'));
+                const e = pendingEdits[i];
+                if (!e) return;
+                const title = '\u270E Edit the replacement text before applying';
+                showViewer(title, String(e.replace ?? ''), (t) => {
+                    e.replace = String(t);
+                    e.edited = true;
+                    if (e.kind === 'wi' && e.find === null) e.hasContent = true;
+                    renderEditCards();
+                    addBubble('note', 'Proposal edited \u2014 apply it when ready.');
+                });
             });
         });
         box.querySelectorAll('[data-cc-skip]').forEach(btn => {
