@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.12.0';
+    const VERSION = '2.12.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2874,7 +2874,14 @@
             const isWi = edit.kind === 'wi';
             const msg = (isMem || isWi) ? null : chat[edit.id];
             const who = (isMem || isWi) ? '' : (msg ? (msg.is_user ? 'USER' : (msg.name || 'AI')) : '?');
-            const label = isWi ? ('\uD83C\uDF10 WB ' + esc(edit.book + '#' + (edit.newEntry ? 'new' : (edit.deleteEntry ? ('DELETE ' + edit.uid) : edit.uid)))) : (isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who)));
+            let label, wiDetail = '';
+            if (isWi) {
+                const act = edit.deleteEntry ? ('\uD83D\uDDD1 delete #' + edit.uid) : (edit.newEntry ? 'new entry' : ('edit #' + edit.uid));
+                label = '\uD83C\uDF10 ' + esc(act);
+                wiDetail = esc(edit.book);
+            } else {
+                label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
+            }
             if (maxBatch > 1 && (edit.batch || 1) !== lastBatch) {
                 lastBatch = edit.batch || 1;
                 const div = document.createElement('div');
@@ -2904,7 +2911,7 @@
                 if (cfg.length) { findShown2Cfg = cfg.join(' \u00b7 '); }
             }
             card.innerHTML =
-                '<div class="cc_card_top"><b>' + label + '</b><span>' + esc(edit.reason || '') + '</span>' +
+                '<div class="cc_card_top"><b>' + label + '</b><span>' + (wiDetail ? '<i style="opacity:0.85;">' + wiDetail + '</i> \u00b7 ' : '') + esc(edit.reason || '') + '</span>' +
                 (edit.editStatus === 'pending'
                     ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button><button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +

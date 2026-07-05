@@ -214,6 +214,8 @@
 
 .cc_card .cc_card_top b {
     color: var(--SmartThemeQuoteColor, #7dd3a8);
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 
 .cc_card .cc_card_top span {
