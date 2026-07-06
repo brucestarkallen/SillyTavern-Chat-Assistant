@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.17.0';
+    const VERSION = '2.18.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2532,6 +2532,8 @@
             '          <button class="cc_btn" id="cc_memcheck" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show detected memory sources">\uD83E\uDDE0 Memory?</button>',
             '          <button class="cc_btn" id="cc_context" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Show the full context the copilot receives">\uD83D\uDCE6 Context</button>',
             '          <button class="cc_btn" id="cc_wi_detect" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Inspect ST and report where your Worldbooks live">\uD83C\uDF10 Worldbook: detect</button>',
+            '          <button class="cc_btn" id="cc_namechat" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Read the thread and suggest a descriptive name for this chat file (good for telling branches apart), then rename it">\uD83C\uDFF7\uFE0F Auto-name this chat</button>',
+            '          <button class="cc_btn" id="cc_renamechat" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Type a new name for the current chat file">\u270F\uFE0F Rename this chat</button>',
             '          <button class="cc_btn" id="cc_clear" style="display:block;width:100%;margin:3px 0;text-align:left;" title="Clear copilot conversation">\uD83E\uDDF9 Clear session</button>',
             '        </div>',
             '      </div>',
@@ -2576,6 +2578,8 @@
         el('cc_critique').addEventListener('click', () => generateCritique());
         el('cc_critpeek').addEventListener('click', () => peekCritique());
         el('cc_wi_detect').addEventListener('click', () => wiDetectReport());
+        el('cc_namechat').addEventListener('click', () => nameChatAuto());
+        el('cc_renamechat').addEventListener('click', () => renameChatManual());
         el('cc_more').addEventListener('click', () => {
             const mm = el('cc_more_menu');
             if (mm) mm.style.display = mm.style.display === 'none' ? 'block' : 'none';
@@ -3177,6 +3181,79 @@
                 console.log(LOG, 'scrubbed EPISODE_END from', n, 'message(s)');
             }
         } catch (e) { /* ignore */ }
+    }
+
+    function sanitizeChatName(raw) {
+        return String(raw || '')
+            .replace(/[\\/:*?"<>|{}\[\]\n\r\t]+/g, ' ')
+            .replace(/^[\/\s.]+/, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80)
+            .trim();
+    }
+
+    async function renameChatFile(rawName) {
+        const c = ctx();
+        const name = sanitizeChatName(rawName);
+        if (!name) { toast('Empty or invalid name \u2014 not renamed.', 'error'); return false; }
+        // ST quirk (issue #3236): /renamechat can revert msg 0 or error unless the chat was just saved.
+        try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { /* ignore */ }
+        await new Promise(function (r) { setTimeout(r, 150); });
+        try {
+            if (typeof c.executeSlashCommandsWithOptions === 'function') {
+                await c.executeSlashCommandsWithOptions('/renamechat ' + name);
+            } else if (typeof c.executeSlashCommands === 'function') {
+                await c.executeSlashCommands('/renamechat ' + name);
+            } else {
+                toast('This SillyTavern build does not expose slash execution \u2014 cannot rename from here.', 'error');
+                return false;
+            }
+        } catch (e) {
+            toast('Rename failed (' + (e && e.message ? e.message : e) + '). If it says the name is unchanged, pick a different one.', 'error');
+            return false;
+        }
+        toast('\uD83C\uDFF7\uFE0F Chat renamed to: ' + name, 'info');
+        addBubble('note', '\uD83C\uDFF7\uFE0F Renamed this chat file to \u201C' + name + '\u201D.');
+        return name;
+    }
+
+    async function suggestChatName() {
+        const c = ctx();
+        const mem = gatherMemory();
+        const chat = c.chat || [];
+        const ids = [];
+        for (let i = Math.max(0, chat.length - 12); i < chat.length; i++) ids.push(i);
+        const recent = ids.length ? fullTextOf(ids) : '';
+        const sys = 'You name a roleplay chat file so different branches and checkpoints are easy to tell apart at a glance. Read the story below and produce ONE concise, specific title of 3 to 8 words capturing what is DISTINCTIVE about THIS particular thread \u2014 the pivotal event, decision, turn, or current situation \u2014 not a generic series name. Plain words, spaces and hyphens only; no quotes, colons, slashes, or emojis. Output ONLY the title on a single line, nothing else.';
+        const user = '[STORY MEMORY]\n' + (mem || '(none)') + '\n\n[RECENT MESSAGES]\n' + (recent || '(none)') + '\n\nTitle:';
+        const sp = await callLLMSmart([{ role: 'system', content: sys }, { role: 'user', content: user }]);
+        let t = (sp && sp.rest ? sp.rest : '').trim();
+        const lines = t.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+        return sanitizeChatName(lines.length ? lines[0] : '');
+    }
+
+    async function nameChatAuto() {
+        if (running) return;
+        const c = ctx();
+        if (!Array.isArray(c.chat)) { toast('No chat loaded.', 'error'); return; }
+        if (!settings.profileId) { toast('Set a Connection Profile first (gear settings) to auto-name.', 'error'); return; }
+        running = true; setBusy(true);
+        const busyNote = addBubble('busy', 'reading the thread to suggest a chat name\u2026');
+        let suggestion = '';
+        try { suggestion = await suggestChatName(); }
+        catch (e) { addBubble('note', 'Name suggestion failed: ' + (e && e.message ? e.message : e)); }
+        finally { busyNote.remove(); running = false; setBusy(false); }
+        if (!suggestion) { toast('Could not generate a name \u2014 use Rename this chat to type one.', 'error'); return; }
+        const chosen = prompt('Rename this chat file to (edit if you like):', suggestion);
+        if (chosen === null) return;
+        await renameChatFile(chosen);
+    }
+
+    async function renameChatManual() {
+        const chosen = prompt('Rename this chat file to:', '');
+        if (chosen === null) return;
+        await renameChatFile(chosen);
     }
 
     function purgeCharacterLedger() {
