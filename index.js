@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ContinuityCopilot]';
-    const VERSION = '2.18.0';
+    const VERSION = '2.19.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2612,6 +2612,21 @@
         });
     }
 
+    function resetAllSettings() {
+        try { if (!confirm('Reset ALL Continuity Copilot settings to their tested defaults?\n\nThis restores every prompt, toggle, cadence, and number to baseline. Your Connection Profile stays selected, and your chats, memory, director state, and critique notes are NOT touched. This cannot be undone.')) return; } catch (e) { return; }
+        const c = ctx();
+        const keepProfile = settings.profileId;
+        const fresh = JSON.parse(JSON.stringify(defaults));
+        fresh.profileId = keepProfile;
+        c.extensionSettings[MODULE] = fresh;
+        settings = fresh;
+        try { persistSettings(); } catch (e) { /* ignore */ }
+        try { buildSettingsUI(); } catch (e) { /* ignore */ }
+        try { applyInjections(); } catch (e) { /* ignore */ }
+        toast('All settings reset to tested defaults (Connection Profile kept).', 'success');
+        addBubble('note', '\u267B\uFE0F All settings reset to their tested defaults. Your Connection Profile, chats, memory, director, and critique are unchanged.');
+    }
+
     function buildSettingsUI() {
         const box = el('cc_settings');
         box.innerHTML = [
@@ -2663,6 +2678,7 @@
             '  <button class="cc_btn" id="cc_resetprompt">Reset prompt</button>',
             '  <button class="cc_btn" id="cc_dirreset">Reset director prompt</button>',
             '  <button class="cc_btn" id="cc_shortreset">Reset shortcuts</button>',
+            '  <button class="cc_btn" id="cc_resetall" style="border-color:rgba(220,120,60,0.7);color:#f0b080;">\u267B\uFE0F Reset ALL settings to defaults</button>',
             '  <button class="cc_btn" id="cc_dumpsc">Raw memory data</button>',
             '</div>',
         ].join('\n');
@@ -2731,6 +2747,7 @@
         el('cc_shortreset').addEventListener('click', () => {
             el('cc_shortcuts').value = DEFAULT_SHORTCUTS;
         });
+        el('cc_resetall').addEventListener('click', () => resetAllSettings());
         el('cc_dumpsc').addEventListener('click', () => {
             const c = ctx();
             const md = c.chatMetadata || c.chat_metadata || {};
