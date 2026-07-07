@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.20.11';
+    const VERSION = '2.21.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -76,6 +76,7 @@
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
         '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
+        '- "find" must be ONE contiguous run of text that appears EXACTLY in [STORY MEMORY]. Do NOT put location or structural descriptions inside "find" \u2014 never write things like "layer 0[10]", "in the summary", or "message 27" unless those exact characters are in the stored text \u2014 and do NOT stitch two separate excerpts together with connective words like "and" / "then". If the same fix applies in two places, emit TWO separate edits. Keep "find" to the SMALLEST span that uniquely covers the change (ideally just the corrected value plus a little real text around it).',
         '- The [bracketed.path] lines in [STORY MEMORY] (e.g. [summaryception.ledger.Jovan.state]) are SECTION LABELS the tool adds to show which field each block of text belongs to \u2014 they are NOT part of the stored text. NEVER put a [bracketed.path] label inside a "find" or "replace"; quote ONLY the actual content that appears below the label. Do not try to "fix", remove, or de-duplicate the labels themselves \u2014 they are display-only.',
         '- When SEVERAL fixes touch the SAME memory field, prefer ONE consolidated edit (a single find/replace that covers them, or a whole-field "path" replace) over many small ones \u2014 applying one edit changes the text, which can make a later edit\'s "find" no longer match. Fewer, larger edits per field apply far more reliably.',
         '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
@@ -1416,10 +1417,18 @@
         if (edit.find == null) {
             next = String(edit.replace ?? '');
         } else {
-            const loc = locate(before, edit.find);
+            let loc = locate(before, edit.find);
+            let effReplace = String(edit.replace ?? '');
+            if (!loc) {
+                const md = minimalDiff(edit.find, effReplace);
+                if (md) {
+                    const loc2 = locate(before, md.coreFind);
+                    if (loc2 && !loc2.ambiguous) { loc = loc2; effReplace = md.coreReplace; }
+                }
+            }
             if (loc && loc.ambiguous) return { ok: false, reason: 'anchor matches ' + (typeof loc.ambiguous === 'number' ? loc.ambiguous + ' places' : 'multiple similar places') + ' in this message \u2014 give a longer unique excerpt' };
             if (!loc) return { ok: false, reason: edit.seenAtReview ? 'message changed since review \u2014 regenerate and apply fresh cards' : '"find" text not located (even fuzzy)' };
-            next = before.slice(0, loc.start) + String(edit.replace ?? '') + before.slice(loc.end);
+            next = before.slice(0, loc.start) + effReplace + before.slice(loc.end);
             if (loc.fuzzy) fuzzyNote = ' (fuzzy match ' + Math.round(loc.sim * 100) + '%)';
         }
         if (next === before) return { ok: false, reason: 'no change produced' };
@@ -1474,7 +1483,38 @@
             .replace(/^\n+|\n+$/g, '');
     }
 
+    // From a find/replace pair, isolate the minimal span that actually changed (strip the common
+    // prefix + suffix). Salvages anchors the model padded with location text or stitched together.
+    function minimalDiff(find, replace) {
+        if (typeof find !== 'string' || typeof replace !== 'string' || find === replace) return null;
+        let p = 0;
+        const maxP = Math.min(find.length, replace.length);
+        while (p < maxP && find.charCodeAt(p) === replace.charCodeAt(p)) p++;
+        let s = 0;
+        const maxS = Math.min(find.length - p, replace.length - p);
+        while (s < maxS && find.charCodeAt(find.length - 1 - s) === replace.charCodeAt(replace.length - 1 - s)) s++;
+        const coreFind = find.slice(p, find.length - s);
+        const coreReplace = replace.slice(p, replace.length - s);
+        if (!coreFind || coreFind === find) return null;
+        if (coreFind.trim().length < 3) return null;
+        return { coreFind: coreFind, coreReplace: coreReplace };
+    }
+
     function applyMemOne(edit, keyBackups) {
+        const res = applyMemOneInner(edit, keyBackups);
+        if (res.ok || !edit || edit._reduced || typeof edit.find !== 'string') return res;
+        // Salvage: the model padded the anchor with location text (e.g. "in layer 0[10]") or stitched two
+        // separate entries with a connective word. Reduce to the minimal changed span and retry ONCE.
+        // applyMemOneInner keeps its uniqueness/ambiguity guards, so this only applies on a unique match
+        // (it can turn a clean failure into a correct edit, never corrupt or mis-apply).
+        const md = minimalDiff(edit.find, String(edit.replace == null ? '' : edit.replace));
+        if (!md) return res;
+        const reduced = Object.assign({}, edit, { find: md.coreFind, replace: md.coreReplace, path: undefined, _reduced: true });
+        const res2 = applyMemOneInner(reduced, keyBackups);
+        return res2.ok ? res2 : res;
+    }
+
+    function applyMemOneInner(edit, keyBackups) {
         if (typeof edit.find === 'string') edit.find = stripMemLabels(edit.find);
         if (typeof edit.replace === 'string') edit.replace = stripMemLabels(edit.replace);
         const c = ctx();
