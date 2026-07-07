@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.25.0';
+    const VERSION = '2.26.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -30,6 +30,7 @@
         '- Be decisive. The instant you identify a concrete continuity, logic, or canon problem, PROPOSE the specific fix as an <edits> / <memedits> / <wiedits> block in the SAME reply. Do NOT end with "want me to adjust?" or "should I propose changes?" \u2014 just propose them. The user has per-fix Apply/Skip cards and one-tap Undo, so a proposal costs them nothing. Ask first ONLY when the fix is genuinely ambiguous (several valid directions) or irreversible \u2014 and even then, give a concrete recommended default and propose it.',
         '- Do not flip-flop to match a perceived mood. If the user pushes back, re-examine the evidence: if you were right, hold your ground and show why; if you were genuinely wrong, correct it cleanly and move on \u2014 no self-flagellation either way.',
         '- You are a confident showrunner and editor, not an assistant fishing for approval. Diagnose, decide, propose \u2014 always grounded in [STORY MEMORY] and the chat.',
+        '- Warmth is not weakness. Be friendly, collaborative, and plainly on the user\u2019s side \u2014 a trusted creative partner who is glad to help, not a gatekeeper. Being decisive and grounded never means being curt or cold. Never open by shutting the user down (e.g. \u201CI need to stop you right there\u201D); lead with what you CAN do, then do it.',
     ].join('\n');
 
     const DEFAULT_SYSTEM_PROMPT = [
@@ -61,6 +62,7 @@
         '- Never invent message ids that are not in the index.',
         '4. USER_EDIT_RULE',
         '5. Outside those blocks, talk to the user naturally. Keep repair talk brief and concrete; for brainstorming and story discussion you may write more. Never paste whole chat messages back at them.',
+        '6. You can ALSO create, edit, configure, and delete SillyTavern Worldbook / World Info (lorebook) entries \u2014 but only when a [WORLDBOOK] block and <wiedits> instructions appear in this prompt. If they are NOT present and the user asks you to work on the lorebook/Worldbook, do NOT refuse flatly and do NOT invent a format: warmly explain that Worldbook editing just needs to be switched on in Chat Assistant\u2019s settings (enable Worldbook editing and select a book), and offer to do it the moment it is on. When those instructions ARE present, treat lorebook work as fully in scope \u2014 never say you cannot do it.',
     ].join('\n');
 
     const MEMEDIT_RULES = [
@@ -672,8 +674,16 @@
         try { arr = parseJsonLoose(raw); } catch (e) { return { edits: [], error: e.message }; }
         if (!Array.isArray(arr)) arr = [arr];
         const edits = [];
-        for (const o of arr) {
+        for (let o of arr) {
             if (!o || typeof o !== 'object') continue;
+            // Tolerate common shape variations models produce: a nested "entry" object,
+            // an "action" verb, and a singular "key". Normalize to the flat schema below.
+            if (o.entry && typeof o.entry === 'object') o = Object.assign({}, o.entry, o); // lift entry fields (content/comment/key); top-level wins
+            const act = typeof o.action === 'string' ? o.action.toLowerCase() : '';
+            if (act === 'create' || act === 'new' || act === 'add' || act === 'new_entry') o.new_entry = o.new_entry != null ? o.new_entry : true;
+            else if (act === 'create_book' || act === 'new_book') o.create_book = o.create_book != null ? o.create_book : true;
+            else if (act === 'delete' || act === 'remove') o.delete_entry = o.delete_entry != null ? o.delete_entry : true;
+            if (o.key !== undefined && o.keys === undefined && o.set_keys === undefined) o.keys = Array.isArray(o.key) ? o.key.map(String) : [String(o.key)];
             const book = String(o.book || (wiEffectiveBooks()[0] || '')).trim();
             if (!book) continue;
             void 0;
@@ -2073,8 +2083,18 @@
             const parsedMem = parseMemEdits(reply);
             if (parsed.error) addBubble('note', 'Edit block error: ' + parsed.error + ' — ask the copilot to resend valid JSON.');
             if (parsedMem.error) addBubble('note', 'Memory edit block error: ' + parsedMem.error + ' — ask the copilot to resend valid JSON.');
-            const parsedWi = wiActive() ? parseWiEdits(reply) : { edits: [] };
-            if (parsedWi.error) addBubble('note', 'Worldbook edit block error: ' + parsedWi.error + ' \u2014 ask the copilot to resend valid JSON.');
+            let parsedWi = { edits: [] };
+            if (wiActive()) {
+                parsedWi = parseWiEdits(reply);
+                if (parsedWi.error) addBubble('note', 'Worldbook edit block error: ' + parsedWi.error + ' \u2014 ask the copilot to resend valid JSON.');
+            } else if (findBlock(reply, 'wiedits')) {
+                // The model tried to edit the Worldbook but the feature is inactive — say why
+                // instead of dropping it silently (which reads as "nothing happened").
+                const why = !wiApiAvailable() ? 'this SillyTavern build does not expose the World Info API'
+                    : (wiEffectiveBooks().length === 0 ? 'no lorebook is selected \u2014 open a World Info book, or pick one in Chat Assistant\u2019s Worldbook settings'
+                    : 'Worldbook editing is switched off \u2014 turn it on in Chat Assistant\u2019s Worldbook settings');
+                addBubble('note', '\u26A0 The assistant proposed Worldbook changes, but nothing was staged because ' + why + '. Enable Worldbook editing and select a book, then ask again.');
+            }
             const allEdits = [...parsed.edits, ...parsedMem.edits, ...parsedWi.edits];
             let didSupersede = 0;
             const supersedeLabels = parseSupersede(reply);
