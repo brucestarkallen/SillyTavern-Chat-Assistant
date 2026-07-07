@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.19.2';
+    const VERSION = '2.20.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1153,6 +1153,7 @@
         cut('fetch', '');
         cut('edits', '[proposed edits below]');
         cut('memedits', '[proposed memory edits below]');
+        cut('supersede', '');
         return out.trim();
     }
 
@@ -1799,6 +1800,8 @@
                     if (wb) messages.splice(2, 0, { role: 'system', content: wb });
                 } catch (e) { console.warn(LOG, 'wi context failed', e); }
             }
+            const pend = pendingProposalsBlock();
+            if (pend) messages.splice(2, 0, { role: 'system', content: pend });
 
             let reply = '';
             let think = '';
@@ -1886,6 +1889,16 @@
             const parsedWi = wiActive() ? parseWiEdits(reply) : { edits: [] };
             if (parsedWi.error) addBubble('note', 'Worldbook edit block error: ' + parsedWi.error + ' \u2014 ask the copilot to resend valid JSON.');
             const allEdits = [...parsed.edits, ...parsedMem.edits, ...parsedWi.edits];
+            let didSupersede = 0;
+            const supersedeLabels = parseSupersede(reply);
+            if (supersedeLabels.length && pendingEdits.length) {
+                const labeledNow = labelForEdits(pendingEdits);
+                for (const lbl of supersedeLabels) {
+                    const norm = lbl.trim().toLowerCase();
+                    const hit = labeledNow.find(x => x.label.toLowerCase() === norm);
+                    if (hit) { if (hit.edit.kind === 'wi') hit.edit.editStatus = 'skipped'; else hit.edit.status = 'skipped'; didSupersede++; }
+                }
+            }
             if (allEdits.length) {
                 editsCollapsed = false;
                 stampReviewState(allEdits);
@@ -1897,8 +1910,9 @@
                 } else {
                     pendingEdits = allEdits;
                 }
-                renderEditCards();
             }
+            if (didSupersede) addBubble('note', '\u21A9 Auto-skipped ' + didSupersede + ' proposal(s) the assistant replaced \u2014 "Apply all" will ignore them.');
+            if (allEdits.length || didSupersede) renderEditCards();
         } catch (err) {
             busy.remove();
             console.error(LOG, err);
@@ -2900,6 +2914,55 @@
         return n > 1 ? ('Batch ' + n) : 'Proposed';
     }
 
+    // Consistent per-kind labels for pending edits: "Chat fix 1", "Memory fix 1", "Worldbook fix 1".
+    // Used identically by the cards, the assistant-awareness block, and supersede matching.
+    function labelForEdits(list) {
+        let cN = 0, mN = 0, wN = 0;
+        return list.map(function (edit) {
+            let label;
+            if (edit.kind === 'wi') { wN++; label = 'Worldbook fix ' + wN; }
+            else if (edit.kind === 'mem') { mN++; label = 'Memory fix ' + mN; }
+            else { cN++; label = 'Chat fix ' + cN; }
+            return { edit: edit, label: label };
+        });
+    }
+
+    // Context block that makes the assistant AWARE of its own not-yet-applied proposals,
+    // so it references them by label and marks any it replaces via <supersede>.
+    function pendingProposalsBlock() {
+        if (!pendingEdits.length) return '';
+        const clip = function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').slice(0, 70); };
+        const lines = labelForEdits(pendingEdits).map(function (x) {
+            const edit = x.edit;
+            let target, summary;
+            if (edit.kind === 'wi') {
+                target = edit.book || 'worldbook';
+                summary = edit.createBook ? 'create book' : (edit.deleteEntry ? 'delete entry' : (edit.newEntry ? 'new entry' : 'edit entry #' + (edit.uid != null ? edit.uid : '?')));
+            } else if (edit.kind === 'mem') {
+                target = edit.path || 'memory';
+                summary = (edit.find == null) ? 'replace whole field' : ('"' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"');
+            } else {
+                target = 'message #' + edit.id;
+                summary = (edit.hide !== null && edit.hide !== undefined) ? (edit.hide ? 'hide from AI context' : 'unhide') : ((edit.find == null) ? 'replace whole message' : ('"' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"'));
+            }
+            const status = (edit.kind === 'wi') ? edit.editStatus : edit.status;
+            return x.label + ' [' + target + ']' + (status && status !== 'pending' ? ' (' + status + ')' : '') + ': ' + summary + (edit.reason ? ' \u2014 ' + edit.reason : '');
+        });
+        return '[PENDING PROPOSALS \u2014 you already proposed these; they are NOT yet applied and are awaiting the user]\n' +
+            lines.join('\n') +
+            '\n\nWhen you next propose edits: only propose NEW fixes. If you are CORRECTING or REPLACING any pending proposal above, do NOT re-list it as-is \u2014 name its exact label(s) in a <supersede> block (e.g. <supersede>Memory fix 1, Chat fix 2</supersede>) and give the corrected version as a fresh edit; the superseded ones are auto-skipped so "Apply all" stays clean. Refer to these by their labels when you talk to the user.';
+    }
+
+    // Parse a <supersede> block: pending-proposal labels the new reply replaces.
+    function parseSupersede(text) {
+        const b = findBlock(text, 'supersede');
+        if (!b) return [];
+        let raw = String(b.inner || '').trim();
+        if (!raw) return [];
+        try { const arr = JSON.parse(raw); if (Array.isArray(arr)) return arr.map(String).map(function (s) { return s.trim(); }).filter(Boolean); } catch (e) { /* not JSON */ }
+        return raw.split(/[,\n;]+/).map(function (s) { return s.trim().replace(/^["'\[]+|["'\]]+$/g, '').trim(); }).filter(Boolean);
+    }
+
     function renderEditCards() {
         const box = el('cc_edits');
         if (!box) return;
@@ -2923,6 +2986,7 @@
         const list = document.createElement('div');
         if (editsCollapsed) list.style.display = 'none';
 
+        const labeled = labelForEdits(pendingEdits);
         const maxBatch = pendingEdits.reduce((mx, e) => Math.max(mx, e.batch || 1), 1);
         let lastBatch = null;
         pendingEdits.forEach((edit, idx) => {
@@ -2938,6 +3002,7 @@
             } else {
                 label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
             }
+            label = '<span style="background:rgba(120,150,255,0.18);padding:1px 6px;border-radius:4px;font-size:0.9em;white-space:nowrap;">' + esc(labeled[idx].label) + '</span> ' + label;
             if (maxBatch > 1 && (edit.batch || 1) !== lastBatch) {
                 lastBatch = edit.batch || 1;
                 const div = document.createElement('div');
