@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.26.0';
+    const VERSION = '2.27.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -93,6 +93,7 @@
         '- Messages you hid are remembered in a ledger even if another extension later makes them visible again (the index will note this). If the user asks to "re-hide my OOC", emit hide edits for every id in that note.',
         '- In explanations, refer to blocks WITHOUT angle brackets (write "edits block", "memedits block", "fetch"). The literal tags must appear ONLY wrapping the actual JSON, never inside prose.',
         '- Anchors ("find") must be UNIQUE within their target message \u2014 the applier REJECTS ambiguous anchors. When in doubt, extend the excerpt a few words on each side.',
+        '- To fix the SAME wording across MANY messages at once (a renamed character, a recurring typo or term), use ONE bulk replace instead of an edit per message: {"bulk_replace": true, "find": "exact text", "replace": "new text", "range": [firstId, lastId], "reason": "..."}. It literally replaces EVERY exact occurrence of "find" within that message range (omit "range" to scan the whole chat, or use "ids": [3,7,9] for specific messages). Choose a distinctive "find" so it only hits what you intend \u2014 the card shows how many messages changed and one Undo reverts them all. Because it is a literal search, you do NOT need to <fetch> those messages first.',
         '- The user can discuss your proposals before applying them. If they ask you to reconsider or refine an edit, simply propose the improved version in a new edits/memedits block \u2014 it is added to the staging area alongside the earlier ones so they can compare and pick. You do not need to resend unchanged proposals.',
         '- VALID JSON is required in every edits / memedits / wiedits block: property names and string values in double quotes; write EVERY line break inside a value as \\n (never a real line break); escape any double-quote inside a value as \\" or use single quotes instead; no comments, no trailing commas, no markdown fences. A single stray character makes the whole block unparseable \u2014 keep each value on one line where you can.',
     ].join('\n');
@@ -1161,6 +1162,17 @@
             const edits = [];
             for (const e of arr) {
                 if (!e || typeof e !== 'object') continue;
+                if (e.bulk_replace === true || e.bulk === true || e.action === 'bulk_replace') {
+                    const bf = (typeof e.find === 'string' && e.find.length) ? e.find : (typeof e.search === 'string' && e.search.length ? e.search : null);
+                    if (!bf) continue;
+                    edits.push({
+                        kind: 'chat', bulk: true, find: bf, replace: String(e.replace ?? ''),
+                        range: Array.isArray(e.range) ? e.range.map(Number) : (Array.isArray(e.msg_range) ? e.msg_range.map(Number) : null),
+                        ids: Array.isArray(e.ids) ? e.ids.map(Number) : (Array.isArray(e.msg_indices) ? e.msg_indices.map(Number) : null),
+                        reason: String(e.reason ?? ''), status: 'pending',
+                    });
+                    continue;
+                }
                 const id = Number(e.id);
                 if (!Number.isInteger(id) || id < 0) continue;
                 edits.push({
@@ -1490,6 +1502,45 @@
         return { ok: true, before, beforeSys, fuzzyNote };
     }
 
+    // Bulk find/replace across a RANGE of messages (literal, exact matches only — the
+    // safe way to fix a recurring error or rename something everywhere in one shot).
+    // Returns every message it changed so a single Undo reverts them all together.
+    async function applyBulkReplace(edit) {
+        const c = ctx();
+        const msgs = c.chat || [];
+        if (!msgs.length) return { ok: false, reason: 'no chat loaded' };
+        const find = String(edit.find ?? '');
+        if (!find) return { ok: false, reason: 'bulk replace needs a non-empty "find"' };
+        const replace = String(edit.replace ?? '');
+        let indices = [];
+        if (Array.isArray(edit.ids) && edit.ids.length) {
+            indices = edit.ids.map(Number).filter(i => Number.isInteger(i) && i >= 0 && i < msgs.length);
+        } else if (Array.isArray(edit.range) && edit.range.length === 2) {
+            const s = Math.max(0, Math.floor(Number(edit.range[0]))), e = Math.min(msgs.length - 1, Math.floor(Number(edit.range[1])));
+            for (let i = s; i <= e; i++) indices.push(i);
+        } else {
+            for (let i = 0; i < msgs.length; i++) indices.push(i);   // whole chat when no scope given
+        }
+        const affected = [];
+        for (const i of indices) {
+            const msg = msgs[i];
+            if (!msg) continue;
+            if (msg.is_user && !settings.allowUserEdits) continue;   // respect the user-message lock
+            const before = String(msg.mes || '');
+            if (before.indexOf(find) === -1) continue;               // literal: only touch real occurrences
+            const next = before.split(find).join(replace);
+            if (next === before) continue;
+            msg.mes = next;
+            msg.extra = msg.extra || {};
+            if (!Array.isArray(msg.extra.cc_backups)) msg.extra.cc_backups = [];
+            msg.extra.cc_backups.push({ ts: Date.now(), mes: before });
+            while (msg.extra.cc_backups.length > 3) msg.extra.cc_backups.shift();
+            affected.push({ id: i, before, beforeSys: !!msg.is_system });
+            refreshMessage(i);
+        }
+        return { ok: true, affected };
+    }
+
     function walkReplace(node, find, replace, path) {
         if (Array.isArray(node)) {
             for (let i = 0; i < node.length; i++) {
@@ -1726,6 +1777,16 @@
                     if (!wiBackups.has(res.book)) wiBackups.set(res.book, res.before);
                 } else {
                     edit.editStatus = 'failed: ' + res.reason;
+                }
+            } else if (edit.bulk) {
+                const res = await applyBulkReplace(edit);
+                if (res.ok && res.affected.length) {
+                    edit.status = 'applied \u2014 ' + res.affected.length + ' message(s)';
+                    for (const a of res.affected) chatApplied.push({ kind: 'chat', id: a.id, before: a.before, beforeSys: a.beforeSys });
+                } else if (res.ok) {
+                    edit.status = 'no matches \u2014 nothing changed';
+                } else {
+                    edit.status = 'failed: ' + res.reason;
                 }
             } else {
                 const res = await applyOne(edit);
@@ -3148,6 +3209,9 @@
             } else if (edit.kind === 'mem') {
                 target = edit.path || 'memory';
                 summary = (edit.find == null) ? 'replace whole field' : ('"' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"');
+            } else if (edit.bulk) {
+                target = Array.isArray(edit.range) ? ('messages #' + edit.range[0] + '\u2013#' + edit.range[1]) : (Array.isArray(edit.ids) ? ('messages ' + edit.ids.map(function (i) { return '#' + i; }).join(',')) : 'all messages');
+                summary = 'bulk replace "' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"';
             } else {
                 target = 'message #' + edit.id;
                 summary = (edit.hide !== null && edit.hide !== undefined) ? (edit.hide ? 'hide from AI context' : 'unhide') : ((edit.find == null) ? 'replace whole message' : ('"' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"'));
@@ -3233,7 +3297,7 @@
                 ? (edit.hide ? '(hide message from AI context \u2014 text stays in log)' : '(unhide message)')
                 : edit.find == null
                     ? (isMem ? (edit.remove !== undefined ? '(remove from ' + (edit.path || '?') + ')' : (edit.append !== undefined ? '(append to ' + (edit.path || '?') + ')' : '(replace field: ' + (edit.path || '?') + ')')) : '(replace entire message)')
-                    : edit.find;
+                    : (edit.bulk ? '(bulk replace across ' + (Array.isArray(edit.range) ? '#' + edit.range[0] + '\u2013#' + edit.range[1] : (Array.isArray(edit.ids) ? edit.ids.length + ' messages' : 'the whole chat')) + ')\n' + edit.find : edit.find);
             const replaceShown = (edit.remove !== undefined)
                 ? (typeof edit.remove === 'object' ? JSON.stringify(edit.remove, null, 2) : String(edit.remove))
                 : (edit.append !== undefined)
