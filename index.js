@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.27.0';
+    const VERSION = '2.28.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1956,7 +1956,11 @@
     function blindEditTargets(edits, winStart, fetchedIds) {
         const ids = [];
         for (const e of (edits || [])) {
-            if (e && e.kind === 'chat' && typeof e.find === 'string' && e.find && Number.isInteger(e.id)) ids.push(e.id);
+            if (!e || e.kind !== 'chat' || e.bulk || !Number.isInteger(e.id)) continue;
+            if (e.hide !== null && e.hide !== undefined) continue;   // hide/unhide needs no message text
+            const isFindEdit = (typeof e.find === 'string' && e.find);
+            const isWholeReplace = (e.find == null && typeof e.replace === 'string'); // rewriting the whole message blind is even riskier than a find that just fails
+            if (isFindEdit || isWholeReplace) ids.push(e.id);
         }
         return [...new Set(ids)].filter(id => id < winStart && !(fetchedIds && fetchedIds.has && fetchedIds.has(id)));
     }
@@ -2079,7 +2083,7 @@
                         const bnote = 'Auto-fetched #' + blind.join(', #') + ' \u2014 the assistant proposed an edit to it without reading it in full, so its exact text was supplied for a correct re-proposal.';
                         addBubble('note', bnote); pushHistory('note', bnote);
                         messages.push({ role: 'assistant', content: reply });
-                        messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(blind) + '\n\nYou proposed an <edits> change to the message(s) above but had only their one-line preview, so the "find" you wrote will not match the stored text. RE-PROPOSE those chat edits now, copying each "find" VERBATIM from the exact text above (omit an edit if it no longer needs changing). Keep every other proposal unchanged.' });
+                        messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(blind) + '\n\nYou proposed an <edits> change to the message(s) above but had only their one-line preview \u2014 so a "find" may not match, and a whole-message rewrite could lose content. Their exact text is now provided. RE-PROPOSE your change against it: for a targeted fix, copy the "find" VERBATIM from the text above; for a whole-message rewrite, base it on this real text and keep everything that should stay. Omit an edit if it no longer needs changing, and keep every other proposal unchanged.' });
                         continue;
                     }
                 }
