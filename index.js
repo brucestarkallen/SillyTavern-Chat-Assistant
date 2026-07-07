@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.21.1';
+    const VERSION = '2.22.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -76,7 +76,7 @@
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
         '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
-        '- A character ledger entry is NOT one editable block: its state, its arc, and EACH thread are stored SEPARATELY, and the memory extension maintains the overall structure. A "find" must NEVER span two of them. To fix a character, make a SMALL targeted correction to the one wrong field or thread, quoting only the wrong words. find/replace only CHANGES text that already exists verbatim \u2014 it can never ADD new sentences or new threads. So never rewrite a whole entry, restructure the threads list, or append content with find/replace; correct the specific wrong words and nothing else.',
+        '- A character ledger entry is NOT one text block: its state, its arc, and EACH thread are stored SEPARATELY. A find/replace "find" must NEVER span two of them, and find/replace can ONLY change text that already exists verbatim. To ADD or RESTRUCTURE, use a STRUCTURAL edit: (a) rewrite a whole list/object field by giving "replace" as a JSON value \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "replace": ["thread one", "thread two"]}; (b) add ONE item without rewriting the rest with "append" \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "append": "new thread"}; "append" also works on a text field like the notepad to add a line. For a small wording fix use a tiny find/replace on the ONE wrong field/thread. Never try to add or restructure with find/replace.',
         '- "find" must be ONE contiguous run of text that appears EXACTLY in [STORY MEMORY]. Do NOT put location or structural descriptions inside "find" \u2014 never write things like "layer 0[10]", "in the summary", or "message 27" unless those exact characters are in the stored text \u2014 and do NOT stitch two separate excerpts together with connective words like "and" / "then". If the same fix applies in two places, emit TWO separate edits. Keep "find" to the SMALLEST span that uniquely covers the change (ideally just the corrected value plus a little real text around it).',
         '- The [bracketed.path] lines in [STORY MEMORY] (e.g. [summaryception.ledger.Jovan.state]) are SECTION LABELS the tool adds to show which field each block of text belongs to \u2014 they are NOT part of the stored text. NEVER put a [bracketed.path] label inside a "find" or "replace"; quote ONLY the actual content that appears below the label. Do not try to "fix", remove, or de-duplicate the labels themselves \u2014 they are display-only.',
         '- When SEVERAL fixes touch the SAME memory field, prefer ONE consolidated edit (a single find/replace that covers them, or a whole-field "path" replace) over many small ones \u2014 applying one edit changes the text, which can make a later edit\'s "find" no longer match. Fewer, larger edits per field apply far more reliably.',
@@ -1150,7 +1150,8 @@
                 const path = (typeof e.path === 'string' && e.path.trim()) ? e.path.trim() : null;
                 const find = (typeof e.find === 'string' && e.find.length) ? e.find : null;
                 if (!find && !path) continue;
-                edits.push({ kind: 'mem', path, find, replace: String(e.replace ?? ''), reason: String(e.reason ?? ''), status: 'pending' });
+                const structured = (e.replace != null && typeof e.replace === 'object');
+                edits.push({ kind: 'mem', path, find, replace: structured ? e.replace : String(e.replace ?? ''), append: (e.append !== undefined ? e.append : undefined), reason: String(e.reason ?? ''), status: 'pending' });
             }
             return { edits };
         } catch (err) {
@@ -1518,6 +1519,7 @@
     function applyMemOneInner(edit, keyBackups) {
         if (typeof edit.find === 'string') edit.find = stripMemLabels(edit.find);
         if (typeof edit.replace === 'string') edit.replace = stripMemLabels(edit.replace);
+        if (typeof edit.append === 'string') edit.append = stripMemLabels(edit.append);
         const c = ctx();
         const md = c.chatMetadata || c.chat_metadata;
         if (!md) return { ok: false, reason: 'no chat metadata' };
@@ -1551,6 +1553,12 @@
             }
             if (typeof node === 'string') {
                 const backupVal = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+                if (edit.append !== undefined) {
+                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                    const tail = String(typeof edit.append === 'object' ? JSON.stringify(edit.append) : edit.append);
+                    parent[key] = node + (node.replace(/\s+$/, '').length ? '\n\n' : '') + tail;
+                    return { ok: true, path: edit.path + ' (appended to field)' };
+                }
                 if (edit.find) {
                     const loc = locate(node, edit.find);
                     if (loc && !loc.ambiguous) {
@@ -1565,8 +1573,21 @@
                     parent[key] = String(edit.replace ?? '');
                     return { ok: true, path: edit.path + ' (full replace)', fuzzy: false };
                 }
+            } else if (edit.append !== undefined && Array.isArray(node)) {
+                const bkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+                if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, bkp);
+                node.push(edit.append);
+                return { ok: true, path: edit.path + ' (appended 1 item)' };
             } else if (!edit.find) {
-                return { ok: false, reason: 'that path points to a list/object, not a text field \u2014 add a verbatim "find" excerpt and I will locate the exact text to change' };
+                let val = edit.replace;
+                if (typeof val === 'string' && val.trim()) { try { const pj = JSON.parse(val); if (pj && typeof pj === 'object') val = pj; } catch (e) { /* not json */ } }
+                if (val != null && typeof val === 'object') {
+                    const bkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, bkp);
+                    parent[key] = val;
+                    return { ok: true, path: edit.path + ' (structural replace)' };
+                }
+                return { ok: false, reason: 'that path is a list/object \u2014 to change it, give "replace" as a JSON array/object (e.g. "replace": ["thread one","thread two"]) or "append" a value; find/replace cannot edit a structured field' };
             }
             // Path did not land on an editable text field (e.g. a Summaryception ledger threads array), or the
             // excerpt was not uniquely in the named field. Since we have a "find", fall through to the memory-wide
@@ -3099,8 +3120,11 @@
                 : (!isMem && edit.hide !== null && edit.hide !== undefined)
                 ? (edit.hide ? '(hide message from AI context \u2014 text stays in log)' : '(unhide message)')
                 : edit.find == null
-                    ? (isMem ? '(replace entire field: ' + (edit.path || '?') + ')' : '(replace entire message)')
+                    ? (isMem ? (edit.append !== undefined ? '(append to ' + (edit.path || '?') + ')' : '(replace field: ' + (edit.path || '?') + ')') : '(replace entire message)')
                     : edit.find;
+            const replaceShown = (edit.append !== undefined)
+                ? (typeof edit.append === 'object' ? JSON.stringify(edit.append, null, 2) : String(edit.append))
+                : (edit.replace != null && typeof edit.replace === 'object' ? JSON.stringify(edit.replace, null, 2) : String(edit.replace == null ? '' : edit.replace));
             if (isWi) {
                 const cfg = [];
                 if (edit.status_type) cfg.push('status=' + edit.status_type);
@@ -3128,7 +3152,7 @@
                 '</div>' +
                 (edit.reason ? '<div style="opacity:0.9;margin:3px 0 5px;line-height:1.35;word-break:break-word;">' + esc(edit.reason) + '</div>' : '') +
                 (isWi && cfgStr ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(cfgStr) + '</div>' : '') +
-                ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
+                ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(replaceShown) + '</div>') +
                 (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
                 (st !== 'pending' ? '<div class="cc_card_status"' + (sstr.indexOf('failed')===0?' style="color:#f2ad5e;font-weight:600;"':sstr.indexOf('applied')===0?' style="color:#7ad39a;"':'') + '>' + (sstr.indexOf('failed')===0?'\u26A0 ':sstr.indexOf('applied')===0?'\u2713 ':'') + esc(st) + '</div>' : '');
             list.appendChild(card);
