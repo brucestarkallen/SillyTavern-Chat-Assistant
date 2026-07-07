@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.24.0';
+    const VERSION = '2.25.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -76,7 +76,7 @@
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
         '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
-        '- A character ledger entry is NOT one text block: its state, its arc, and EACH thread are stored SEPARATELY. A find/replace "find" must NEVER span two of them, and find/replace can ONLY change text that already exists verbatim. To ADD or RESTRUCTURE, use a STRUCTURAL edit: (a) rewrite a whole list/object field by giving "replace" as a JSON value \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "replace": ["thread one", "thread two"]}; (b) add ONE item without rewriting the rest with "append" \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "append": "new thread"}; "append" also works on a text field like the notepad to add a line. For a small wording fix use a tiny find/replace on the ONE wrong field/thread. Never try to add or restructure with find/replace.',
+        '- A character ledger entry is NOT one text block: its state, its arc, and EACH thread are stored SEPARATELY. A find/replace "find" must NEVER span two of them, and find/replace can ONLY change text that already exists verbatim. To ADD or RESTRUCTURE, use a STRUCTURAL edit: (a) rewrite a whole list/object field by giving "replace" as a JSON value \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "replace": ["thread one", "thread two"]}; (b) add ONE item without rewriting the rest with "append" \u2014 e.g. {"path": "summaryception.ledger.Renjiro.threads", "append": "new thread"}; "append" also works on a text field like the notepad to add a line; (c) REMOVE one list item, or a span of text from a field, with "remove" - e.g. {"path": "summaryception.ledger.Renjiro.threads", "remove": "the exact resolved-thread text"} - the clean way to drop a resolved thread or delete a stale line WITHOUT rewriting the whole list. For a small wording fix use a tiny find/replace on the ONE wrong field/thread. Never try to add or restructure with find/replace.',
         '- "find" must be ONE contiguous run of text that appears EXACTLY in [STORY MEMORY]. Do NOT put location or structural descriptions inside "find" \u2014 never write things like "layer 0[10]", "in the summary", or "message 27" unless those exact characters are in the stored text \u2014 and do NOT stitch two separate excerpts together with connective words like "and" / "then". If the same fix applies in two places, emit TWO separate edits. Keep "find" to the SMALLEST span that uniquely covers the change (ideally just the corrected value plus a little real text around it).',
         '- The [bracketed.path] lines in [STORY MEMORY] (e.g. [summaryception.ledger.Jovan.state]) are SECTION LABELS the tool adds to show which field each block of text belongs to \u2014 they are NOT part of the stored text. NEVER put a [bracketed.path] label inside a "find" or "replace"; quote ONLY the actual content that appears below the label. Do not try to "fix", remove, or de-duplicate the labels themselves \u2014 they are display-only.',
         '- When SEVERAL fixes touch the SAME memory field, prefer ONE consolidated edit (a single find/replace that covers them, or a whole-field "path" replace) over many small ones \u2014 applying one edit changes the text, which can make a later edit\'s "find" no longer match. Fewer, larger edits per field apply far more reliably.',
@@ -1186,7 +1186,7 @@
                 const find = (typeof e.find === 'string' && e.find.length) ? e.find : null;
                 if (!find && !path) continue;
                 const structured = (e.replace != null && typeof e.replace === 'object');
-                edits.push({ kind: 'mem', path, find, replace: structured ? e.replace : String(e.replace ?? ''), append: (e.append !== undefined ? e.append : undefined), reason: String(e.reason ?? ''), status: 'pending' });
+                edits.push({ kind: 'mem', path, find, replace: structured ? e.replace : String(e.replace ?? ''), append: (e.append !== undefined ? e.append : undefined), remove: (e.remove !== undefined ? e.remove : undefined), reason: String(e.reason ?? ''), status: 'pending' });
             }
             return { edits };
         } catch (err) {
@@ -1555,6 +1555,7 @@
         if (typeof edit.find === 'string') edit.find = stripMemLabels(edit.find);
         if (typeof edit.replace === 'string') edit.replace = stripMemLabels(edit.replace);
         if (typeof edit.append === 'string') edit.append = stripMemLabels(edit.append);
+        if (typeof edit.remove === 'string') edit.remove = stripMemLabels(edit.remove);
         const c = ctx();
         const md = c.chatMetadata || c.chat_metadata;
         if (!md) return { ok: false, reason: 'no chat metadata' };
@@ -1588,6 +1589,16 @@
             }
             if (typeof node === 'string') {
                 const backupVal = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+                if (edit.remove !== undefined) {
+                    const target = String(typeof edit.remove === 'object' ? JSON.stringify(edit.remove) : edit.remove).trim();
+                    if (!target) return { ok: false, reason: 'remove needs the text to delete' };
+                    const loc = locate(node, target);
+                    if (loc && loc.ambiguous) return { ok: false, reason: 'text to remove matches multiple places \\u2014 give a longer unique excerpt' };
+                    if (!loc) return { ok: false, reason: 'text to remove not found in that field' };
+                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                    parent[key] = (node.slice(0, loc.start) + node.slice(loc.end)).replace(/\n{3,}/g, '\n\n').trim();
+                    return { ok: true, path: edit.path + ' (removed text)', fuzzy: !!loc.fuzzy };
+                }
                 if (edit.append !== undefined) {
                     if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
                     const tail = String(typeof edit.append === 'object' ? JSON.stringify(edit.append) : edit.append);
@@ -1613,6 +1624,22 @@
                 if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, bkp);
                 node.push(edit.append);
                 return { ok: true, path: edit.path + ' (appended 1 item)' };
+            } else if (edit.remove !== undefined && Array.isArray(node)) {
+                const target = String(typeof edit.remove === 'object' ? JSON.stringify(edit.remove) : edit.remove).trim();
+                if (!target) return { ok: false, reason: 'remove needs the item text to drop' };
+                let ridx = -1, rfz = false;
+                for (let k = 0; k < node.length; k++) { if (typeof node[k] === 'string' && node[k].trim() === target) { ridx = k; break; } }
+                if (ridx < 0) {
+                    const matches = [];
+                    for (let k = 0; k < node.length; k++) { if (typeof node[k] === 'string') { const loc = locate(node[k], target); if (loc && !loc.ambiguous) matches.push({ k: k, fz: !!loc.fuzzy }); } }
+                    if (matches.length === 1) { ridx = matches[0].k; rfz = matches[0].fz; }
+                    else if (matches.length > 1) return { ok: false, reason: 'that text matches ' + matches.length + ' list items \\u2014 give the exact item text to remove' };
+                }
+                if (ridx < 0) return { ok: false, reason: 'no list item matches that text to remove' };
+                const rbkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
+                if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, rbkp);
+                node.splice(ridx, 1);
+                return { ok: true, path: edit.path + ' (removed 1 item)', fuzzy: rfz };
             } else if (!edit.find) {
                 let val = edit.replace;
                 if (typeof val === 'string' && val.trim()) { try { const pj = JSON.parse(val); if (pj && typeof pj === 'object') val = pj; } catch (e) { /* not json */ } }
@@ -3185,9 +3212,11 @@
                 : (!isMem && edit.hide !== null && edit.hide !== undefined)
                 ? (edit.hide ? '(hide message from AI context \u2014 text stays in log)' : '(unhide message)')
                 : edit.find == null
-                    ? (isMem ? (edit.append !== undefined ? '(append to ' + (edit.path || '?') + ')' : '(replace field: ' + (edit.path || '?') + ')') : '(replace entire message)')
+                    ? (isMem ? (edit.remove !== undefined ? '(remove from ' + (edit.path || '?') + ')' : (edit.append !== undefined ? '(append to ' + (edit.path || '?') + ')' : '(replace field: ' + (edit.path || '?') + ')')) : '(replace entire message)')
                     : edit.find;
-            const replaceShown = (edit.append !== undefined)
+            const replaceShown = (edit.remove !== undefined)
+                ? (typeof edit.remove === 'object' ? JSON.stringify(edit.remove, null, 2) : String(edit.remove))
+                : (edit.append !== undefined)
                 ? (typeof edit.append === 'object' ? JSON.stringify(edit.append, null, 2) : String(edit.append))
                 : (edit.replace != null && typeof edit.replace === 'object' ? JSON.stringify(edit.replace, null, 2) : String(edit.replace == null ? '' : edit.replace));
             if (isWi) {
@@ -3208,7 +3237,7 @@
             else if (sstr.indexOf('failed') === 0) card.style.cssText = 'border-left:3px solid rgba(235,150,55,0.95);background:rgba(235,150,55,0.07);';
             else if (sstr === 'skipped') card.style.cssText = 'opacity:0.5;';
             // Which cards support inline replacement-text editing: anything with a replace/content payload.
-            const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined);
+            const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined) && edit.remove === undefined;
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b>' + (wiDetail ? '<i style="opacity:0.85;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + wiDetail + '</i>' : '') + '<span style="flex:1 1 auto;"></span>' +
                 (st === 'pending'
