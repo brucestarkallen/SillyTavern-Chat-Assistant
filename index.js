@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.20.1';
+    const VERSION = '2.20.2';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3050,7 +3050,7 @@
                     : '') +
                 '</div>' +
                 (isWi && cfgStr ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(cfgStr) + '</div>' : '') +
-                ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
+                ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before" style="max-height:120px;overflow:auto;">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before" style="max-height:120px;overflow:auto;">' + esc(findShown) + '</div><div class="cc_diff cc_after" style="max-height:320px;overflow:auto;">' + esc(edit.replace) + '</div>') +
                 (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
                 (st !== 'pending' ? '<div class="cc_card_status">' + esc(st) + '</div>' : '');
             list.appendChild(card);
