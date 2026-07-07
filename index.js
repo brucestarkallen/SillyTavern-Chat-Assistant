@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.30.0';
+    const VERSION = '2.31.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -74,6 +74,7 @@
         '- "find" must be verbatim from [STORY MEMORY] and long enough to be unique. Keep corrections minimal and in the same style.',
         '- CRITICAL for "find": copy the excerpt CHARACTER-FOR-CHARACTER from the [STORY MEMORY] block \u2014 do NOT paraphrase, reword, summarize, or quote from the chat/story text instead. Even a few reworded words can make it fail to match. If you are not certain of the exact wording, do a whole-field replace with "path" instead of a find/replace.',
         '- To replace an ENTIRE memory field, use {"path": "summaryception.notepad", "replace": "new full text", "reason": "..."} with the exact path shown in [STORY MEMORY] section headers. Adding "find" alongside "path" replaces only within that field.',
+        '- Do NOT confuse the two stores. The actual scene prose the characters are LIVING is in CHAT MESSAGES \u2014 fix a wrong detail there with an <edits> chat edit and the message "id". [STORY MEMORY] holds the summaries / notes / ledger ABOUT the scene \u2014 fix those with <memedits>. Use <memedits> ONLY for text that literally appears under a [bracketed.path] label in [STORY MEMORY]; if the wrong wording is in the story prose itself and NOT under such a label, it is a chat message, so use <edits>.',
         '- The Author\'s Note is writable at path "note_prompt" (created if absent). The visible editor-critique notes are writable at path "cc_critique"; full replace with "" deletes them.',
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
@@ -1605,6 +1606,20 @@
         return { coreFind: coreFind, coreReplace: coreReplace };
     }
 
+    // Is this excerpt actually sitting in a CHAT message (not memory)? Returns the
+    // message index or -1. Used to redirect a misfiled memory edit to a chat edit.
+    function findInChat(text) {
+        if (typeof text !== 'string' || text.trim().length < 4) return -1;
+        const chat = ctx().chat || [];
+        for (let i = 0; i < chat.length; i++) {
+            const m = chat[i];
+            if (!m || typeof m.mes !== 'string') continue;
+            const loc = locate(m.mes, text);
+            if (loc && !loc.ambiguous) return i;
+        }
+        return -1;
+    }
+
     function applyMemOne(edit, keyBackups) {
         const res = applyMemOneInner(edit, keyBackups);
         if (res.ok || !edit || edit._reduced || typeof edit.find !== 'string') return res;
@@ -1613,10 +1628,19 @@
         // applyMemOneInner keeps its uniqueness/ambiguity guards, so this only applies on a unique match
         // (it can turn a clean failure into a correct edit, never corrupt or mis-apply).
         const md = minimalDiff(edit.find, String(edit.replace == null ? '' : edit.replace));
-        if (!md) return res;
-        const reduced = Object.assign({}, edit, { find: md.coreFind, replace: md.coreReplace, path: undefined, _reduced: true });
-        const res2 = applyMemOneInner(reduced, keyBackups);
-        return res2.ok ? res2 : res;
+        if (md) {
+            const reduced = Object.assign({}, edit, { find: md.coreFind, replace: md.coreReplace, path: undefined, _reduced: true });
+            const res2 = applyMemOneInner(reduced, keyBackups);
+            if (res2.ok) return res2;
+        }
+        // Still not in memory. A VERY common cause is the model trying to fix CHAT text
+        // with a memory edit. If the excerpt is actually in a message, say so and point it
+        // to the right tool — this breaks the "keep re-proposing the same memory edit" loop.
+        try {
+            const hit = findInChat(edit.find);
+            if (hit >= 0) return { ok: false, reason: 'that text is in chat message #' + hit + ', not in memory \u2014 re-propose it as an <edits> chat edit with "id": ' + hit + ' (not <memedits>)' };
+        } catch (_) {}
+        return res;
     }
 
     function applyMemOneInner(edit, keyBackups) {
