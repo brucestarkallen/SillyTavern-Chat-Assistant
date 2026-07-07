@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.29.0';
+    const VERSION = '2.30.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1841,7 +1841,11 @@
         const c = ctx();
         const changed = [];
         let memRestored = false;
-        for (const item of batch.items) {
+        // Restore in REVERSE apply order: if one batch touched the same message twice
+        // (e.g. a bulk replace over a range plus a targeted edit on a message in it),
+        // the EARLIEST "before" is the true original, so it must be applied LAST to win.
+        for (let _i = batch.items.length - 1; _i >= 0; _i--) {
+            const item = batch.items[_i];
             if (item.kind === 'mem') {
                 const md = c.chatMetadata || c.chat_metadata;
                 if (md) { md[item.key] = item.before; memRestored = true; }
@@ -2942,7 +2946,7 @@
             '<input type="number" id="cc_crit_auto" min="0" max="100">',
             '<div class="cc_check"><input type="checkbox" id="cc_dir_auto"><span>Auto-director: keep a secret episode running (auto-starts E1, auto-chains Next on conclusion; needs a Connection Profile)</span></div>',
             '<div style="margin:10px 0 2px;font-weight:600;opacity:0.75;">Worldbook (World Info) \u2014 optional</div>',
-            '<div class="cc_check"><input type="checkbox" id="cc_wi_enable"><span>Let the copilot see & edit Worldbook entries (off = ignored entirely)</span></div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_wi_enable"><span>Inject the Worldbook\u2019s existing entries so the copilot can see &amp; audit them. Creating and editing entries works whenever a book is active in SillyTavern \u2014 even with this off.</span></div>',
             '<label>Book name(s) to manage (comma-separated; use \u201CWorldbook: detect\u201D in the \u22EE menu to find them)</label>',
             '<input type="text" id="cc_wi_books" placeholder="e.g. Mithraic Academy Lore">',
             '<div class="cc_check"><input type="checkbox" id="cc_wi_full"><span>Load FULL entry text into the copilot (token heavy; off = catalog + fetch-on-demand)</span></div>',
@@ -3288,7 +3292,7 @@
                 label = '\uD83C\uDF10 ' + esc(act);
                 wiDetail = esc(edit.book);
             } else {
-                label = isMem ? 'MEMORY' : ('#' + edit.id + ' ' + esc(who));
+                label = isMem ? 'MEMORY' : (edit.bulk ? '\uD83D\uDD01 BULK' : ('#' + edit.id + ' ' + esc(who)));
             }
             label = '<span style="background:rgba(120,150,255,0.18);padding:1px 6px;border-radius:4px;font-size:0.9em;white-space:nowrap;">' + esc(labeled[idx].label) + '</span> ' + label;
             if (maxBatch > 1 && (edit.batch || 1) !== lastBatch) {
