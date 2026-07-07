@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.20.2';
+    const VERSION = '2.20.3';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3044,11 +3044,12 @@
             // Which cards support inline replacement-text editing: anything with a replace/content payload.
             const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined);
             card.innerHTML =
-                '<div class="cc_card_top"><b>' + label + '</b><span>' + (wiDetail ? '<i style="opacity:0.85;">' + wiDetail + '</i> \u00b7 ' : '') + esc(edit.reason || '') + '</span>' +
+                '<div class="cc_card_top"><b>' + label + '</b>' + (wiDetail ? '<i style="opacity:0.85;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + wiDetail + '</i>' : '') + '<span style="flex:1 1 auto;"></span>' +
                 (st === 'pending'
                     ? '<button class="cc_btn" data-cc-apply="' + idx + '">Apply</button>' + (canEditText ? '<button class="cc_btn" data-cc-editcard="' + idx + '" title="Hand-edit the new text before applying">\u270E</button>' : '') + '<button class="cc_btn" data-cc-skip="' + idx + '">Skip</button>'
                     : '') +
                 '</div>' +
+                (edit.reason ? '<div style="opacity:0.9;margin:3px 0 5px;line-height:1.35;word-break:break-word;">' + esc(edit.reason) + '</div>' : '') +
                 (isWi && cfgStr ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(cfgStr) + '</div>' : '') +
                 ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before" style="max-height:120px;overflow:auto;">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before" style="max-height:120px;overflow:auto;">' + esc(findShown) + '</div><div class="cc_diff cc_after" style="max-height:320px;overflow:auto;">' + esc(edit.replace) + '</div>') +
                 (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
