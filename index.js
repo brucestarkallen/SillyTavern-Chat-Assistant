@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.21.0';
+    const VERSION = '2.21.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -76,6 +76,7 @@
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
         '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
+        '- A character ledger entry is NOT one editable block: its state, its arc, and EACH thread are stored SEPARATELY, and the memory extension maintains the overall structure. A "find" must NEVER span two of them. To fix a character, make a SMALL targeted correction to the one wrong field or thread, quoting only the wrong words. find/replace only CHANGES text that already exists verbatim \u2014 it can never ADD new sentences or new threads. So never rewrite a whole entry, restructure the threads list, or append content with find/replace; correct the specific wrong words and nothing else.',
         '- "find" must be ONE contiguous run of text that appears EXACTLY in [STORY MEMORY]. Do NOT put location or structural descriptions inside "find" \u2014 never write things like "layer 0[10]", "in the summary", or "message 27" unless those exact characters are in the stored text \u2014 and do NOT stitch two separate excerpts together with connective words like "and" / "then". If the same fix applies in two places, emit TWO separate edits. Keep "find" to the SMALLEST span that uniquely covers the change (ideally just the corrected value plus a little real text around it).',
         '- The [bracketed.path] lines in [STORY MEMORY] (e.g. [summaryception.ledger.Jovan.state]) are SECTION LABELS the tool adds to show which field each block of text belongs to \u2014 they are NOT part of the stored text. NEVER put a [bracketed.path] label inside a "find" or "replace"; quote ONLY the actual content that appears below the label. Do not try to "fix", remove, or de-duplicate the labels themselves \u2014 they are display-only.',
         '- When SEVERAL fixes touch the SAME memory field, prefer ONE consolidated edit (a single find/replace that covers them, or a whole-field "path" replace) over many small ones \u2014 applying one edit changes the text, which can make a later edit\'s "find" no longer match. Fewer, larger edits per field apply far more reliably.',
@@ -3026,7 +3027,7 @@
             return typeof stx === 'string' && stx.indexOf('failed') === 0;
         }).map(function (x) { return x.label; });
         const failNote = failed.length
-            ? ('\n\nSOME PROPOSALS FAILED TO APPLY: ' + failed.join(', ') + '. They failed because the "find" excerpt did not match the source text exactly \u2014 usually because it was reconstructed or paraphrased instead of copied. To fix each: for a CHAT edit, if you do NOT already have that message\'s FULL text above, <fetch> that message first and copy the "find" verbatim from the fetched text (never guess a message you have not fetched); for a MEMORY edit, copy the "find" CHARACTER-FOR-CHARACTER from the [STORY MEMORY] block. Never paraphrase or reword. If unsure, quote a SHORTER fragment you are 100% certain of \u2014 for a small change like a number typo the single failing word can be the ENTIRE "find" (e.g. find "Two-fourteen", replace "Two-thirty-eight") \u2014 or replace the whole field with a "path" edit. Do not drop them silently.')
+            ? ('\n\nSOME PROPOSALS FAILED TO APPLY: ' + failed.join(', ') + '. They failed because the "find" excerpt did not match the source text exactly \u2014 either it was paraphrased instead of copied, OR it tried to do too much at once. To fix each: for a CHAT edit, if you do NOT already have that message\'s FULL text above, <fetch> that message first and copy the "find" verbatim; for a MEMORY edit, copy the "find" CHARACTER-FOR-CHARACTER from [STORY MEMORY]. Never paraphrase. CRUCIAL: keep each edit TINY \u2014 correct only the specific wrong words. A "find" must be ONE contiguous run that ALREADY EXISTS verbatim: do NOT stitch two fields or two thread entries together (they are stored separately and can never match as one block), and find/replace can NEVER add new sentences or new threads (it only changes text that is already there). If a big change is needed, break it into several tiny edits or a single whole-field "path" replace. If unsure, the one wrong word can be the whole "find" (e.g. find "Two-fourteen", replace "Two-thirty-eight"). Do not drop them silently.')
             : '';
         return '[PENDING PROPOSALS \u2014 you already proposed these; they are NOT yet applied and are awaiting the user]\n' +
             lines.join('\n') +
