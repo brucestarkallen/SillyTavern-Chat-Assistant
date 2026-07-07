@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.20.5';
+    const VERSION = '2.20.6';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -75,6 +75,7 @@
         '- LARGE CHANGES: if a replacement would be very long, split the work into SEVERAL smaller find/replace edits (section by section) in the same block instead of one huge replace \u2014 each edit\'s replace text must stay comfortably within the response budget, or the reply gets cut off.',
         '- Anchors ("find") must be UNIQUE across the entire memory \u2014 the applier REJECTS anchors that match multiple places. Extend the excerpt until it is unmistakable.',
         '- Only prose/text fields are editable. Never target structural fields (turnRange, timestamps, indices, counters).',
+        '- When SEVERAL fixes touch the SAME memory field, prefer ONE consolidated edit (a single find/replace that covers them, or a whole-field "path" replace) over many small ones \u2014 applying one edit changes the text, which can make a later edit\'s "find" no longer match. Fewer, larger edits per field apply far more reliably.',
         '- Use <edits> only for chat messages and <memedits> only for memory. Never mix them.',
     ].join('\n');
 
@@ -3047,6 +3048,10 @@
                 if (cfg.length) { cfgStr = cfg.join(' \u00b7 '); }
             }
             const st = isWi ? edit.editStatus : edit.status;
+            const sstr = typeof st === 'string' ? st : '';
+            if (sstr.indexOf('applied') === 0) card.style.cssText = 'border-left:3px solid rgba(90,200,130,0.9);opacity:0.58;';
+            else if (sstr.indexOf('failed') === 0) card.style.cssText = 'border-left:3px solid rgba(235,150,55,0.95);background:rgba(235,150,55,0.07);';
+            else if (sstr === 'skipped') card.style.cssText = 'opacity:0.5;';
             // Which cards support inline replacement-text editing: anything with a replace/content payload.
             const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined);
             card.innerHTML =
@@ -3059,7 +3064,7 @@
                 (isWi && cfgStr ? '<div class="cc_card_status" style="opacity:0.8;">config: ' + esc(cfgStr) + '</div>' : '') +
                 ((isWi && (edit.deleteEntry || (!edit.hasContent && edit.find === null))) ? (edit.deleteEntry ? '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div>' : '') : '<div class="cc_diff cc_before" style="max-height:110px;overflow:hidden;">' + esc(findShown) + '</div><div class="cc_diff cc_after">' + esc(edit.replace) + '</div>') +
                 (edit.edited ? '<div class="cc_card_status" style="opacity:0.7;">\u270E edited by you</div>' : '') +
-                (st !== 'pending' ? '<div class="cc_card_status">' + esc(st) + '</div>' : '');
+                (st !== 'pending' ? '<div class="cc_card_status"' + (sstr.indexOf('failed')===0?' style="color:#f2ad5e;font-weight:600;"':sstr.indexOf('applied')===0?' style="color:#7ad39a;"':'') + '>' + (sstr.indexOf('failed')===0?'\u26A0 ':sstr.indexOf('applied')===0?'\u2713 ':'') + esc(st) + '</div>' : '');
             list.appendChild(card);
         });
 
