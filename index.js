@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.33.0';
+    const VERSION = '2.34.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2812,6 +2812,7 @@
             '  <span class="cc_title">Chat Assistant</span>',
             '  <span class="cc_sub" id="cc_sub"></span>',
             '  <span class="cc_hbtn" id="cc_gear" title="Settings"><i class="fa-solid fa-gear"></i></span>',
+            '  <span class="cc_hbtn" id="cc_full" title="Fullscreen" aria-pressed="false"><i class="fa-solid fa-expand"></i></span>',
             '  <span class="cc_hbtn" id="cc_close" title="Close"><i class="fa-solid fa-xmark"></i></span>',
             '</div>',
             '<div id="cc_sessbar" style="display:flex;gap:6px;padding:6px 10px;align-items:center;flex-wrap:wrap;flex:0 0 auto;border-bottom:1px solid rgba(255,255,255,0.15);">',
@@ -2869,6 +2870,23 @@
             el('cc_settings').classList.toggle('cc_open');
             refreshProfileSelect();
         });
+        function setFullscreen(on) {
+            const p = el('cc_panel'); if (!p) return;
+            const fs = (on === undefined) ? p.classList.toggle('cc_fullscreen') : (on ? (p.classList.add('cc_fullscreen'), true) : (p.classList.remove('cc_fullscreen'), false));
+            // Clear any inline position/size from a previous drag/resize so the CSS wins in fullscreen,
+            // and so exiting returns the panel to its normal default spot rather than a stale one.
+            p.style.top = ''; p.style.left = ''; p.style.right = ''; p.style.bottom = ''; p.style.width = ''; p.style.height = '';
+            const btn = el('cc_full'), ic = btn && btn.querySelector('i');
+            if (ic) ic.className = fs ? 'fa-solid fa-compress' : 'fa-solid fa-expand';
+            if (btn) { btn.title = fs ? 'Exit fullscreen' : 'Fullscreen'; btn.setAttribute('aria-pressed', fs ? 'true' : 'false'); }
+        }
+        el('cc_full').addEventListener('click', () => setFullscreen(undefined));
+        // Esc exits fullscreen first (before any close-on-Esc), so the panel never gets stuck full-screen.
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && el('cc_panel') && el('cc_panel').classList.contains('cc_fullscreen')) {
+                e.stopPropagation(); e.preventDefault(); setFullscreen(false);
+            }
+        }, true);
         el('cc_send').addEventListener('click', () => {
             if (running) { requestStop(); return; }
             const t = el('cc_input').value;
@@ -3456,6 +3474,7 @@
         });
         handle.addEventListener('pointermove', (e) => {
             if (!dragging) return;
+            if (panel.classList.contains('cc_fullscreen')) return;   // pinned in fullscreen; don't let a drag break it
             const nx = Math.min(Math.max(0, ox + e.clientX - sx), window.innerWidth - 80);
             const ny = Math.min(Math.max(0, oy + e.clientY - sy), window.innerHeight - 40);
             panel.style.left = nx + 'px';
