@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.34.0';
+    const VERSION = '2.35.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -43,6 +43,7 @@
         '- [STORY MEMORY]: ground truth pulled from the user\'s memory extensions (summaries, snippets, audits, notes).',
         '- [MESSAGE INDEX]: one line per chat message: #id [speaker] preview.',
         '- [FULL MESSAGES]: complete text of some messages.',
+        '- [CONTINUITY FLAGS] (when present): source-level contradictions Summaryception\'s memory auditor found between a chat message and established canon \u2014 fix each in the chat message it names.',
         '- The user\'s request and your previous conversation with them.',
         '',
         'Rules:',
@@ -958,6 +959,27 @@
         return out.join('\n\n');
     }
 
+    // Open SOURCE-level continuity flags from Summaryception's auditor (guarded: returns ''
+    // if the auditor isn't present). These are contradictions between a chat MESSAGE and
+    // established canon — the copilot fixes them at the message. Snippet-level flags are
+    // Summaryception's own job and are deliberately NOT surfaced here.
+    function buildContinuityFlags() {
+        try {
+            const api = (typeof window !== 'undefined' ? window : globalThis).summaryceptionContinuity;
+            if (!api || typeof api.list !== 'function') return '';
+            const open = (api.list() || []).filter(f => f && (f.status === 'open' || f.status === undefined) && f.where === 'source' && f.fix);
+            if (!open.length) return '';
+            const lines = open.map(f => {
+                const tr = Array.isArray(f.turnRange) ? f.turnRange : null;
+                const loc = tr ? (tr[0] === tr[1] ? ('message #' + tr[0]) : ('messages #' + tr[0] + '\u2013#' + tr[1])) : 'unknown message(s)';
+                return '- [' + f.id + '] (' + loc + ') ISSUE: ' + String(f.issue || '') + '  \u2014  SHOULD BE: ' + String(f.fix || '');
+            });
+            return '\n\n[CONTINUITY FLAGS] (Summaryception auditor \u2014 SOURCE-level: the chat MESSAGE is wrong, not the memory)\n'
+                + 'Each is a real contradiction between a chat message and established canon. Fix it in the MESSAGE with an <edits> chat edit on the listed id, rewriting it to reflect SHOULD BE while preserving everything else (fetch the message first if you only have its preview). Do NOT edit memory snippets for these \u2014 Summaryception realigns the snippet automatically once the message is corrected. If, on inspection, one is not actually a problem, say so and skip it (do not edit).\n'
+                + lines.join('\n');
+        } catch (_) { return ''; }
+    }
+
     function buildContextBlock() {
         const chat = ctx().chat || [];
         const n = Math.max(0, Math.min(100, Number(settings.recentFull) || 0));
@@ -973,7 +995,7 @@
             '[FULL MESSAGES] (last ' + ids.length + ')',
             ids.length ? fullTextOf(ids) : '(none)',
         ].join('\n');
-        return base;
+        return base + buildContinuityFlags();
     }
 
     const WI_RULES = [
