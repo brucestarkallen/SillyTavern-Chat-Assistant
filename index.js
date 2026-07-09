@@ -972,10 +972,10 @@
             const lines = open.map(f => {
                 const tr = Array.isArray(f.turnRange) ? f.turnRange : null;
                 const loc = tr ? (tr[0] === tr[1] ? ('message #' + tr[0]) : ('messages #' + tr[0] + '\u2013#' + tr[1])) : 'unknown message(s)';
-                return '- [' + f.id + '] (' + loc + ') ISSUE: ' + String(f.issue || '') + '  \u2014  SHOULD BE: ' + String(f.fix || '');
+                return '- ' + loc + '  [Summaryception flag ' + f.id + ']\n    ISSUE: ' + String(f.issue || '') + '\n    SHOULD BE: ' + String(f.fix || '');
             });
             return '\n\n[CONTINUITY FLAGS] (Summaryception auditor \u2014 SOURCE-level: the chat MESSAGE is wrong, not the memory)\n'
-                + 'Each is a real contradiction between a chat message and established canon. Fix it in the MESSAGE with an <edits> chat edit on the listed id, rewriting it to reflect SHOULD BE while preserving everything else (fetch the message first if you only have its preview). Do NOT edit memory snippets for these \u2014 Summaryception realigns the snippet automatically once the message is corrected. If, on inspection, one is not actually a problem, say so and skip it (do not edit).\n'
+                + 'Each is a real contradiction between a chat MESSAGE and established canon. Fix it in that message: emit an <edits> chat edit whose "id" is the message number shown (for "message #34" use id 34; for a range, the single message that actually contains the error), rewriting it to reflect SHOULD BE while preserving everything else (fetch that message first if you only have its preview \u2014 it may be ghosted, which is fine to edit). The bracketed [Summaryception flag ...] tag is a reference only \u2014 NEVER put it in "id". Do NOT edit memory snippets for these \u2014 Summaryception realigns the snippet itself once the message is fixed (it emits MESSAGE_EDITED, which Summaryception re-checks; snippet realignment needs Summaryception Auto-fix on, otherwise it leaves a one-click Apply in its own panel). If, on inspection, one is not actually a problem, say so and skip it (do not edit); it will clear from here once resolved in Summaryception.\n'
                 + lines.join('\n');
         } catch (_) { return ''; }
     }
