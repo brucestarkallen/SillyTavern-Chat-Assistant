@@ -45,6 +45,10 @@
     min-height: 0;
     border-radius: 0;
     resize: none;
+    /* Sit above SillyTavern's always-on-top bar/drawers. In windowed mode the panel
+       lives at top:60px BELOW that bar, so 3000 is fine; but at top:0 in fullscreen the
+       header slides under it and the restore/close buttons get painted over. */
+    z-index: 100000;
 }
 
 #cc_panel.cc_fullscreen #cc_header {
@@ -52,6 +56,12 @@
     top: 0;
     z-index: 5;
     background-color: var(--SmartThemeBlurTintColor, rgba(23, 23, 23, 0.98));
+    box-sizing: border-box;
+    /* Keep the buttons clear of the status bar, notch and rounded/gesture edges on mobile.
+       env() resolves to 0 where there's no inset, so this is a no-op on desktop. */
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+    padding-right: calc(10px + env(safe-area-inset-right, 0px));
+    padding-left: calc(10px + env(safe-area-inset-left, 0px));
 }
 
 #cc_header {
