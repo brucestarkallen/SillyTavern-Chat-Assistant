@@ -71,6 +71,7 @@
     padding: 6px 10px;
     cursor: move;
     user-select: none;
+    touch-action: none; /* without this, Android treats header drags as page scroll/selection */
     border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
     flex: 0 0 auto;
 }

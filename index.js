@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.37.1';
+    const VERSION = '2.38.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -184,6 +184,11 @@
     let inited = false;
     let stopRequested = false;
     let abortCtl = null;
+    // True only while a callLLM is going through ctx().generateRaw (the "Current API"
+    // fallback). That path has no abort signal — ctx().stopGeneration() is the only
+    // way to cancel it. It must NOT be called for Connection-Profile requests, or a
+    // copilot Stop would also kill the user's unrelated MAIN story generation.
+    let usingFallbackGen = false;
 
     // ------------------------------------------------------------------
     // Small helpers
@@ -276,18 +281,44 @@
     function saveMeta() {
         const c = ctx();
         try {
-            if (typeof c.saveMetadata === 'function') { c.saveMetadata(); return; }
+            // Debounced first: history pushes and auto-counters call this constantly;
+            // a full synchronous metadata write per call is needless disk churn.
             if (typeof c.saveMetadataDebounced === 'function') { c.saveMetadataDebounced(); return; }
+            if (typeof c.saveMetadata === 'function') { c.saveMetadata(); return; }
         } catch (e) { /* ignore */ }
     }
 
-    function pushHistory(role, content, think) {
-        const m = meta();
+    // Identity of the currently loaded chat. Used to guard every LLM flow: results
+    // computed for chat A must never be written into chat B if the user switches
+    // mid-generation (cross-chat contamination). chatId when the build exposes it,
+    // metadata object identity as the tiebreak (ST swaps the object on chat change).
+    function chatRef() {
+        const c = ctx();
+        let id = '';
+        try { id = String(c.chatId ?? (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : '') ?? ''); } catch (e) { id = ''; }
+        return { id, md: c.chatMetadata || c.chat_metadata || null };
+    }
+
+    function sameChat(ref) {
+        if (!ref) return true;
+        const now = chatRef();
+        if (ref.id && now.id) return ref.id === now.id;
+        return ref.md === now.md;
+    }
+
+    // Write to an EXPLICIT session object, so a reply lands in the session that
+    // asked for it even if the user switched sessions while the LLM was running.
+    function pushHistoryTo(sess, role, content, think) {
+        if (!sess || !Array.isArray(sess.history)) return;
         const entry = { role, content };
         if (think) entry.think = String(think).slice(0, 20000);
-        m.history.push(entry);
-        if (m.history.length > 80) m.history.splice(0, m.history.length - 80);
+        sess.history.push(entry);
+        if (sess.history.length > 80) sess.history.splice(0, sess.history.length - 80);
         saveMeta();
+    }
+
+    function pushHistory(role, content, think) {
+        pushHistoryTo(meta(), role, content, think);
     }
 
     function renderSessions() {
@@ -727,7 +758,6 @@
             if (o.key !== undefined && o.keys === undefined && o.set_keys === undefined) o.keys = Array.isArray(o.key) ? o.key.map(String) : [String(o.key)];
             const book = String(o.book || (wiEffectiveBooks()[0] || '')).trim();
             if (!book) continue;
-            void 0;
             const hasContent = (o.replace !== undefined) || (o.replace_content !== undefined) || (o.content !== undefined);
             edits.push({
                 kind: 'wi', book,
@@ -961,13 +991,15 @@
             if (m.is_system) {
                 const tag = led.has(i) ? '(hidden)' : (ghosts.has(i) ? '(ghosted by memory)' : '(hidden)');
                 if (settings.includeHidden) {
-                    lines.push('#' + i + ' [' + who + '] ' + tag + ': ' + oneLine(m.mes).slice(0, 150));
+                    lines.push('#' + i + ' [' + who + '] ' + tag + ': ' + oneLine(String(m.mes || '').slice(0, 600)).slice(0, 150));
                 } else {
                     lines.push('#' + i + ' [' + who + '] ' + tag);
                 }
                 continue;
             }
-            lines.push('#' + i + ' [' + who + ']: ' + oneLine(m.mes).slice(0, 150));
+            // Slice BEFORE normalizing: the preview needs 150 chars, so collapsing
+            // whitespace across a whole multi-KB message per line is wasted work.
+            lines.push('#' + i + ' [' + who + ']: ' + oneLine(String(m.mes || '').slice(0, 600)).slice(0, 150));
         }
         const restored = [...led].filter(i2 => chat[i2] && !chat[i2].is_system);
         if (restored.length) {
@@ -1152,12 +1184,15 @@
             .map(m => (m.role === 'user' ? '[User]\n' : '[Assistant]\n') + m.content)
             .join('\n\n') + '\n\n[Assistant]\n';
         if (typeof c.generateRaw === 'function') {
+            usingFallbackGen = true;
             try {
                 const res = await c.generateRaw({ prompt: convo, systemPrompt: sys });
                 return extractText(res);
             } catch (se) {
                 if (stopRequested) return '';
                 throw se;
+            } finally {
+                usingFallbackGen = false;
             }
         }
         throw new Error('No generation backend found. Pick a Connection Profile in the panel settings (gear icon).');
@@ -1307,20 +1342,29 @@
         return normChars(s).toLowerCase();
     }
 
-    function levenshtein(a, b) {
+    function levenshtein(a, b, maxDist) {
         const m = a.length, n = b.length;
         if (!m) return n;
         if (!n) return m;
+        const cap = (Number.isFinite(maxDist) && maxDist >= 0) ? maxDist : Infinity;
+        // The distance can never be below the length difference — bail before any work.
+        if (Math.abs(m - n) > cap) return cap + 1;
         let prev = new Array(n + 1);
         let cur = new Array(n + 1);
         for (let j = 0; j <= n; j++) prev[j] = j;
         for (let i = 1; i <= m; i++) {
             cur[0] = i;
             const ai = a[i - 1];
+            let rowMin = cur[0];
             for (let j = 1; j <= n; j++) {
                 const cost = ai === b[j - 1] ? 0 : 1;
-                cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+                const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+                cur[j] = v;
+                if (v < rowMin) rowMin = v;
             }
+            // Every entry can only grow or stay as rows advance; once the whole row
+            // exceeds the cap, the final distance must too — abort with "over cap".
+            if (rowMin > cap) return cap + 1;
             const tmp = prev; prev = cur; cur = tmp;
         }
         return prev[n];
@@ -1386,9 +1430,17 @@
                         const node = resolveMemPath(e.path);
                         e.reviewHash = (typeof node === 'string') ? hashText(node) : null;
                     }
-                } else if (e.kind === 'chat' && e.find && Number.isInteger(e.id)) {
+                } else if (e.kind === 'chat' && !e.bulk && Number.isInteger(e.id)) {
                     const m2 = ctx().chat?.[e.id];
-                    e.seenAtReview = !!(m2 && countOccurrences(String(m2.mes || ''), e.find) > 0);
+                    if (e.find) {
+                        e.seenAtReview = !!(m2 && countOccurrences(String(m2.mes || ''), e.find) > 0);
+                    } else {
+                        // Whole-message replace and hide/unhide address a message purely by
+                        // index. If messages are edited or deleted between proposal and
+                        // Apply, the index can point at DIFFERENT text — hash it now so
+                        // applyOne can refuse instead of clobbering the wrong message.
+                        e.reviewHash = m2 ? hashText(String(m2.mes || '')) : null;
+                    }
                 }
             }
         } catch (e) { /* ignore */ }
@@ -1428,10 +1480,49 @@
 
         let best = null;
         let second = 0;
+        // Outcome floor: acceptance needs best.sim >= 0.78 and the ambiguity test
+        // compares second >= best.sim - 0.05, so no window with sim < 0.73 can ever
+        // change the result. dist <= 0.27 * maxLen is the equivalent distance cap —
+        // windows over it are pruned without affecting the answer.
+        const needleCount = new Map();
+        for (const nw2 of needleWords) needleCount.set(nw2, (needleCount.get(nw2) || 0) + 1);
+        // Deterministic safety valve for degenerate inputs (e.g. one word repeated
+        // thousands of times, where every window passes every filter): cap total
+        // Levenshtein cell work. Purely input-determined — same inputs, same result —
+        // and failing toward null is safe (the edit fails and gets re-proposed;
+        // nothing is ever mis-applied).
+        let cellBudget = 5000000;
         for (const w of widths) {
+            const cap = Math.floor(0.27 * Math.max(w, nw));
+            // Sliding multiset intersection with the needle: for word-level edit
+            // distance, dist >= max(m, n) - intersection (each shared word can save
+            // at most one edit), so windows failing that bound skip Levenshtein
+            // entirely. O(1) per slide.
+            const winCount = new Map();
+            let inter = 0;
+            for (let k = 0; k < w; k++) {
+                const y = hayWords[k];
+                const cy = (winCount.get(y) || 0) + 1;
+                winCount.set(y, cy);
+                if (cy <= (needleCount.get(y) || 0)) inter++;
+            }
             for (let s2 = 0; s2 + w <= tokens.length; s2++) {
+                if (s2 > 0) {
+                    const out = hayWords[s2 - 1];
+                    const co = winCount.get(out) || 0;
+                    if (co <= (needleCount.get(out) || 0)) inter--;
+                    winCount.set(out, co - 1);
+                    const inw = hayWords[s2 + w - 1];
+                    const ci = (winCount.get(inw) || 0) + 1;
+                    winCount.set(inw, ci);
+                    if (ci <= (needleCount.get(inw) || 0)) inter++;
+                }
+                if (Math.max(w, nw) - inter > cap) continue;
+                cellBudget -= w * nw;
+                if (cellBudget < 0) return null;
                 const cand = hayWords.slice(s2, s2 + w);
-                const dist = levenshtein(cand, needleWords);
+                const dist = levenshtein(cand, needleWords, cap);
+                if (dist > cap) continue;
                 const sim = 1 - dist / Math.max(cand.length, nw);
                 if (!best || sim > best.sim) {
                     if (best && (s2 + w <= best.s || s2 >= best.s + best.w)) second = Math.max(second, best.sim);
@@ -1514,6 +1605,9 @@
         const msg = c.chat?.[i];
         if (!msg) return { ok: false, reason: 'no message #' + i };
         if (edit.hide !== null && edit.hide !== undefined) {
+            if (edit.reviewHash && hashText(String(msg.mes || '')) !== edit.reviewHash) {
+                return { ok: false, reason: 'message #' + i + ' changed since review (edited or reindexed) \u2014 regenerate and apply fresh cards' };
+            }
             const beforeSys = !!msg.is_system;
             if (beforeSys === !!edit.hide) return { ok: false, reason: edit.hide ? 'already hidden' : 'already visible' };
             if (!edit.hide && ghostedSet().has(i)) {
@@ -1535,6 +1629,9 @@
         let next;
         let fuzzyNote = '';
         if (edit.find == null) {
+            if (edit.reviewHash && hashText(before) !== edit.reviewHash) {
+                return { ok: false, reason: 'message #' + i + ' changed since review (edited or reindexed) \u2014 regenerate and apply fresh cards' };
+            }
             next = String(edit.replace ?? '');
         } else {
             let loc = locate(before, edit.find);
@@ -1664,11 +1761,15 @@
     function findInChat(text) {
         if (typeof text !== 'string' || text.trim().length < 4) return -1;
         const chat = ctx().chat || [];
+        const t2 = normChars(text);
+        // Exact / quote-normalized only. This is a "did the model quote CHAT text
+        // into a memory edit?" check — verbatim by definition, so fuzzy matching is
+        // both wrong (an invented excerpt could fuzzy-hit somewhere and produce a
+        // false redirect) and a full fuzzy scan of every message on a failure path.
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
             if (!m || typeof m.mes !== 'string') continue;
-            const loc = locate(m.mes, text);
-            if (loc && !loc.ambiguous) return i;
+            if (m.mes.includes(text) || normChars(m.mes).includes(t2)) return i;
         }
         return -1;
     }
@@ -1742,7 +1843,7 @@
                     const target = String(typeof edit.remove === 'object' ? JSON.stringify(edit.remove) : edit.remove).trim();
                     if (!target) return { ok: false, reason: 'remove needs the text to delete' };
                     const loc = locate(node, target);
-                    if (loc && loc.ambiguous) return { ok: false, reason: 'text to remove matches multiple places \\u2014 give a longer unique excerpt' };
+                    if (loc && loc.ambiguous) return { ok: false, reason: 'text to remove matches multiple places \u2014 give a longer unique excerpt' };
                     if (!loc) return { ok: false, reason: 'text to remove not found in that field' };
                     if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
                     parent[key] = (node.slice(0, loc.start) + node.slice(loc.end)).replace(/\n{3,}/g, '\n\n').trim();
@@ -1782,7 +1883,7 @@
                     const matches = [];
                     for (let k = 0; k < node.length; k++) { if (typeof node[k] === 'string') { const loc = locate(node[k], target); if (loc && !loc.ambiguous) matches.push({ k: k, fz: !!loc.fuzzy }); } }
                     if (matches.length === 1) { ridx = matches[0].k; rfz = matches[0].fz; }
-                    else if (matches.length > 1) return { ok: false, reason: 'that text matches ' + matches.length + ' list items \\u2014 give the exact item text to remove' };
+                    else if (matches.length > 1) return { ok: false, reason: 'that text matches ' + matches.length + ' list items \u2014 give the exact item text to remove' };
                 }
                 if (ridx < 0) return { ok: false, reason: 'no list item matches that text to remove' };
                 const rbkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
@@ -1803,6 +1904,13 @@
             // Path did not land on an editable text field (e.g. a Summaryception ledger threads array), or the
             // excerpt was not uniquely in the named field. Since we have a "find", fall through to the memory-wide
             // search below, which recursively locates the excerpt anywhere in memory (including inside lists).
+        }
+        // Once field scoping is abandoned, the same global-uniqueness guard that
+        // protects unscoped edits must apply — otherwise a path edit whose anchor
+        // exists in several fields would first-match into the wrong one.
+        if (edit.path && edit.find) {
+            const totalExact = memCountExact(edit.find);
+            if (totalExact > 1) return { ok: false, reason: 'anchor matches ' + totalExact + ' places across memory \u2014 give a longer unique excerpt' };
         }
         for (const [key, val] of Object.entries(md)) {
             if (key === MODULE || !re.test(key) || val == null) continue;
@@ -1936,7 +2044,6 @@
                 if (item.before && item.before.__newbook) {
                     // Undo of a created book: empty it (best effort \u2014 ST keeps no getContext book-delete).
                     await wiSave(item.book, { entries: {} });
-                    memRestored = false;
                 } else {
                     await wiSave(item.book, item.before);
                 }
@@ -2075,7 +2182,10 @@
         if (!running) return;
         stopRequested = true;
         try { abortCtl?.abort(); } catch (e) { /* ignore */ }
-        try { ctx().stopGeneration?.(); } catch (e) { /* ignore */ }
+        // Only the raw-generation fallback runs through ST's main pipeline; profile
+        // requests are aborted via their own signal above. Calling stopGeneration
+        // unconditionally would also cancel an unrelated main-chat generation.
+        if (usingFallbackGen) { try { ctx().stopGeneration?.(); } catch (e) { /* ignore */ } }
         toast('Stopping\u2026', 'info');
     }
 
@@ -2121,11 +2231,20 @@
         if (running) return;
         running = true;
         setBusy(true);
+        const chatAt = chatRef();               // which chat asked
+        const sessObj = meta();                 // which session asked — replies go HERE
         const sessAtStart = metaRoot().activeId;
         const busy = addBubble('busy', Number.isInteger(opts.swipeIdx)
             ? 'regenerating \u2014 new alternative (old answer kept as a swipe)\u2026'
             : 'thinking\u2026');
+        let lastPaint = 0;
         const live = (acc, reasoning) => {
+            // Throttle to ~8 paints/s: streaming chunks arrive far faster than that,
+            // and every paint is an esc() + innerHTML reflow (jank + battery on mobile).
+            // The final full text is rendered by renderHistory, so no trailing paint is needed.
+            const now = Date.now();
+            if (now - lastPaint < 120) return;
+            lastPaint = now;
             const log = el('cc_log');
             const pinned = !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
             const head = (settings.showThinking && reasoning) ? '[thinking]\n' + reasoning + '\n\n' : '';
@@ -2158,15 +2277,20 @@
                 const split = await callLLMSmart(messages, live);
                 reply = split.rest;
                 think = split.think;
+                if (!sameChat(chatAt)) {
+                    busy.remove();
+                    addBubble('note', 'Chat changed mid-generation \u2014 the reply for the previous chat was discarded (nothing was written anywhere).');
+                    return;
+                }
                 if (stopRequested) {
                     addBubble('note', 'Generation stopped \u2014 partial reply kept.');
-                    pushHistory('note', 'Generation stopped \u2014 partial reply kept.');
+                    pushHistoryTo(sessObj, 'note', 'Generation stopped \u2014 partial reply kept.');
                     break;
                 }
                 const wiRefs = wiCanEdit() ? parseWiFetch(reply) : null;
                 if (wiRefs && wiRefs.length && round < rounds) {
                     const note = '\uD83C\uDF10 Assistant read full Worldbook entries: ' + wiRefs.join(', ');
-                    addBubble('note', note); pushHistory('note', note);
+                    addBubble('note', note); pushHistoryTo(sessObj, 'note', note);
                     messages.push({ role: 'assistant', content: reply });
                     messages.push({ role: 'user', content: '[WORLDBOOK ENTRIES]\n' + await wiFullText(wiRefs) });
                     continue;
@@ -2184,7 +2308,7 @@
                     if (blind.length) {
                         blind.forEach(id => fetchedIds.add(id));
                         const bnote = 'Auto-fetched #' + blind.join(', #') + ' \u2014 the assistant proposed an edit to it without reading it in full, so its exact text was supplied for a correct re-proposal.';
-                        addBubble('note', bnote); pushHistory('note', bnote);
+                        addBubble('note', bnote); pushHistoryTo(sessObj, 'note', bnote);
                         messages.push({ role: 'assistant', content: reply });
                         messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(blind) + '\n\nYou proposed an <edits> change to the message(s) above but had only their one-line preview \u2014 so a "find" may not match, and a whole-message rewrite could lose content. Their exact text is now provided. RE-PROPOSE your change against it: for a targeted fix, copy the "find" VERBATIM from the text above; for a whole-message rewrite, base it on this real text and keep everything that should stay. Omit an edit if it no longer needs changing, and keep every other proposal unchanged.' });
                         continue;
@@ -2198,26 +2322,31 @@
                 if (fresh.length) {
                     const note = 'Assistant read full text of #' + fresh.join(', #') + ' (fetch ' + (round + 1) + '/' + rounds + ')' + (fresh.length < ids.length ? ' \u2014 skipped ' + (ids.length - fresh.length) + ' already-fetched' : '');
                     addBubble('note', note);
-                    pushHistory('note', note);
+                    pushHistoryTo(sessObj, 'note', note);
                     let payload = '[FETCHED MESSAGES]\n' + fullTextOf(fresh);
                     if (round === rounds - 1) payload += '\n\n(This was your final fetch \u2014 produce your complete answer now; further fetch requests will not be served.)';
                     messages.push({ role: 'user', content: payload });
                 } else {
                     const note = 'Assistant re-requested already-fetched messages \u2014 told it to answer now.';
                     addBubble('note', note);
-                    pushHistory('note', note);
+                    pushHistoryTo(sessObj, 'note', note);
                     messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n(All requested ids were already provided earlier in this conversation \u2014 re-read them above instead of re-fetching. If you need DIFFERENT messages, fetch those; otherwise produce your complete final answer.)' });
                 }
             }
             const exhausted = parseFetch(reply);
 
             busy.remove();
+            if (!sameChat(chatAt)) {
+                addBubble('note', 'Chat changed mid-generation \u2014 the reply for the previous chat was discarded (nothing was written anywhere).');
+                return;
+            }
+            const sessStillExists = metaRoot().sessions.includes(sessObj);
             if (Number.isInteger(opts.swipeIdx)) {
-                if (metaRoot().activeId !== sessAtStart) {
+                if (!sessStillExists || metaRoot().activeId !== sessAtStart) {
                     addBubble('note', 'Swipe result discarded \u2014 session changed during generation.');
                     return;
                 }
-                const entry = meta().history[opts.swipeIdx];
+                const entry = sessObj.history[opts.swipeIdx];
                 if (entry && entry.role === 'assistant') {
                     ensureSwipes(entry);
                     entry.swipes.push({ content: reply, think: think || '' });
@@ -2226,25 +2355,30 @@
                     entry.think = think || '';
                     saveMeta();
                 }
+            } else if (sessStillExists) {
+                // Written to the session that ASKED, even if the user is now viewing
+                // another one — the reply must never leak into a different session.
+                pushHistoryTo(sessObj, 'assistant', reply, think);
             } else {
-                pushHistory('assistant', reply, think);
+                addBubble('note', 'The session that asked was deleted during generation \u2014 reply discarded.');
+                return;
             }
             renderHistory();
 
             if (exhausted) {
                 const warn = '\u26A0 Ran out of fetch rounds while the copilot was still requesting messages \u2014 the answer may be incomplete. Raise "Fetch rounds" in settings, or narrow the request (e.g. one snippet/layer at a time).';
                 addBubble('note', warn);
-                pushHistory('note', warn);
+                pushHistoryTo(sessObj, 'note', warn);
             }
             if (!reply && think && !stopRequested) {
                 const twarn2 = '\u26A0 The model spent its entire output budget on thinking and produced no answer, even after automatic recoveries. Raise "Max output tokens" in settings, lower the reasoning effort in this Connection Profile\'s preset, or narrow the request. The thinking is preserved above so the tokens were not wasted.';
                 addBubble('note', twarn2);
-                pushHistory('note', twarn2);
+                pushHistoryTo(sessObj, 'note', twarn2);
             }
             if (looksTruncated(reply, 'edits') || looksTruncated(reply, 'memedits')) {
                 const twarn = '\u26A0 The reply looks cut off mid-edit block (response budget too small). Raise "Max output tokens" toward your provider\'s output limit, or tell the copilot to split the change into several smaller edits.';
                 addBubble('note', twarn);
-                pushHistory('note', twarn);
+                pushHistoryTo(sessObj, 'note', twarn);
             }
 
             const parsed = parseEdits(reply);
@@ -2323,8 +2457,9 @@
             renderHistory();
             const pe = parseEdits(entry.content);
             const pm = parseMemEdits(entry.content);
+            const pw = wiCanEdit() ? parseWiEdits(entry.content) : { edits: [] };
             editsCollapsed = false;
-            const swiped = [...pe.edits, ...pm.edits];
+            const swiped = [...pe.edits, ...pm.edits, ...pw.edits];
             stampReviewState(swiped);
             swiped.forEach(e => { e.batch = 1; });
             pendingEdits = swiped;
@@ -2466,6 +2601,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', isAuto ? 'auto-editor reviewing the story\u2026' : 'the editor is reviewing\u2026');
+        const chatAt = chatRef();
         try {
             const c = ctx();
             const md = c.chatMetadata || c.chat_metadata || {};
@@ -2485,6 +2621,7 @@
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 critique unchanged.'); return; }
+            if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-review \u2014 critique for the previous chat discarded.'); return; }
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty critique');
             md.cc_critique = text;
@@ -2545,6 +2682,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', mode === 'seed' ? 'directing your episode\u2026' : mode === 'next' ? 'directing the next episode\u2026' : 'directing\u2026');
+        const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
             const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '')
@@ -2556,6 +2694,7 @@
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
+            if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
             const ep = (mode === 'next' || mode === 'seed')
@@ -2597,6 +2736,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'revising the directive\u2026');
+        const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
             const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '')
@@ -2608,6 +2748,7 @@
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
+            if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-revision \u2014 the directive belonged to the previous chat and was discarded.'); return; }
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
             const ep = prev?.episode || 1;
@@ -2639,6 +2780,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'checking episode progress\u2026');
+        const chatAt = chatRef();
         try {
             const sys = 'You are checking secret episode progress for a roleplay director. You receive the SECRET DIRECTIVE and the story context. Judge whether the episode\'s LANDING has been reached based only on actual narrated story events; ignore any literal [EPISODE_END] marker text. Reply with EXACTLY one line, spoiler-free, in one of these formats: "ONGOING \u2014 <short vague progress hint, no spoilers>" or "CONCLUDED \u2014 <short line>" or "DERAILED \u2014 <short line>". Never quote or reveal the directive contents.';
             const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '') + '\n\n[SECRET DIRECTIVE]\n' + d.text + '\n\nJudge the progress now.';
@@ -2647,6 +2789,7 @@
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped.'); return; }
+            if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 progress check for the previous chat discarded.'); return; }
             const line = (sp.rest.trim().split('\n')[0] || (sp.think ? 'UNKNOWN \u2014 answer consumed by thinking; raise Max output tokens' : '')).slice(0, 200);
             addBubble('note', '\uD83C\uDFAC ' + line);
             pushHistory('note', '\uD83C\uDFAC ' + line);
@@ -2669,6 +2812,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'sketching episode seeds\u2026');
+        const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
             const sys = [
@@ -2686,6 +2830,7 @@
                 { role: 'user', content: user },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped.'); return; }
+            if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 seeds for the previous chat discarded.'); return; }
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty suggestions');
             const note = '\uD83D\uDCA1 Episode seeds \u2014 pick one, remix, or ignore. Start the one you want with "#e \u2026":\n' + text;
@@ -3796,14 +3941,17 @@
         if (!Array.isArray(c.chat)) { toast('No chat loaded.', 'error'); return; }
         if (!settings.profileId) { toast('Set a Connection Profile first (gear settings) to auto-name.', 'error'); return; }
         running = true; setBusy(true);
+        const chatAt = chatRef();
         const busyNote = addBubble('busy', 'reading the thread to suggest a chat name\u2026');
         let suggestion = '';
         try { suggestion = await suggestChatName(); }
         catch (e) { addBubble('note', 'Name suggestion failed: ' + (e && e.message ? e.message : e)); }
         finally { busyNote.remove(); running = false; setBusy(false); }
         if (!suggestion) { toast('Could not generate a name \u2014 use Rename this chat to type one.', 'error'); return; }
+        if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 the suggested name was for the previous chat; not renaming.'); return; }
         const chosen = prompt('Rename this chat file to (edit if you like):', suggestion);
         if (chosen === null) return;
+        if (!sameChat(chatAt)) { addBubble('note', 'Chat changed while the rename prompt was open \u2014 not renaming.'); return; }
         await renameChatFile(chosen);
     }
 
