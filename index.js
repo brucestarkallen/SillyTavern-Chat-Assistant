@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.41.0';
+    const VERSION = '2.41.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -288,6 +288,7 @@
         if (!m.sessions.some(x => x.id === m.activeId)) m.activeId = m.sessions[0].id;
         if (!Array.isArray(m.ccHidden)) m.ccHidden = [];
         if (!Number.isFinite(m.directorEp)) m.directorEp = (m.director && Number(m.director.episode)) || 0;
+        if (!m.director && m.directorEp) m.directorEp = 0; // heal legacy half-reset: cleared directive must not haunt numbering
         return m;
     }
 
@@ -2825,9 +2826,7 @@
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
-            const ep = (mode === 'next' || mode === 'seed')
-                ? (Math.max(Number(prev?.episode) || 0, Number(metaRoot().directorEp) || 0) + 1)
-                : (Number(prev?.episode) || 1);
+            const ep = computeEpisodeNumber(mode, prev?.episode, metaRoot().directorEp);
             metaRoot().director = { text, episode: ep, ts: Date.now() };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
@@ -2847,13 +2846,28 @@
         }
     }
 
+    // Episode numbering semantics:
+    // - 'new'  : replaces the CURRENT episode's directive — keeps its number (1 if none).
+    // - 'next' / 'seed' : the next episode — previous number + 1 (1 if starting fresh).
+    // - hiEp is a defensive high-water mark kept equal to the live directive's number;
+    //   it only matters if metadata was written by an older version or a concurrent
+    //   instance. clearDirective() resets it — ending a season restarts numbering at 1.
+    function computeEpisodeNumber(mode, prevEp, hiEp) {
+        const prev = Number(prevEp) || 0;
+        const hi = Number(hiEp) || 0;
+        if (mode === 'next' || mode === 'seed') return Math.max(prev, hi) + 1;
+        return prev || 1;
+    }
+
     function clearDirective() {
         if (!metaRoot().director) { toast('No directive active.', 'warning'); return; }
-        if (!confirm('Remove the secret directive?')) return;
+        if (!confirm('End the current season? This removes the secret directive and resets episode numbering \u2014 the next episode will be Episode 1. (To pause the Director without resetting, switch its mode to Off in settings.)')) return;
         metaRoot().director = null;
+        metaRoot().directorEp = 0;          // season over: numbering restarts at 1
+        delete metaRoot().cowriterNudged;   // fresh season gets a fresh co-writer nudge
         saveMeta();
         applyInjections();
-        const note = '\uD83C\uDFAC Directive cleared.';
+        const note = '\uD83C\uDFAC Directive cleared \u2014 season ended. Numbering reset: the next episode will be Episode 1.';
         addBubble('note', note);
         pushHistory('note', note);
         updateSub();
