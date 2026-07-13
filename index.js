@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.44.0';
+    const VERSION = '2.44.1';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -2893,7 +2893,7 @@
         delete metaRoot().cowriterNudged;   // fresh season gets a fresh co-writer nudge
         saveMeta();
         applyInjections();
-        const note = '\uD83C\uDFAC Directive cleared \u2014 season ended. Numbering reset: the next episode will be Episode 1.';
+        const note = '\uD83C\uDFAC Directive cleared \u2014 season ended. Numbering reset: the next episode will be Episode 1. Note: story memory (ledger/summaries) may still hold residue from planned-but-unplayed beats of the old season \u2014 say "audit memory for leftovers from the cleared season" and I\'ll scan and propose removals.';
         addBubble('note', note);
         pushHistory('note', note);
         updateSub();
