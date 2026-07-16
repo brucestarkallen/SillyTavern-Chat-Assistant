@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.54.0';
+    const VERSION = '2.55.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3032,6 +3032,9 @@
         if (mode === 'seed') {
             extra.push('The player has provided an EPISODE SEED \u2014 their co-written premise for the next episode. The seed is MANDATORY: build the entire episode around it, and keep the player\'s stated intent as the A-plot \u2014 your inventions complicate HOW it unfolds, never replace WHAT it is. Expand it the way a great showrunner would, asking: what version of this premise would a viewer remember for years? Concretely: (a) STACK MEANING before the centerpiece \u2014 establish what it settles personally (between the people involved), socially (what every watcher will conclude), and materially (what changes hands with the outcome), so the event carries three kinds of weight at once; (b) give the centerpiece PHASES and a mid-turn \u2014 build-up or ritual, escalating stages, and one moment where its nature changes (a technique unveiled, a rule invoked, an interruption, a mask slipping); (c) POPULATE it \u2014 name who watches and what different watchers want from different outcomes; rivals, patrons, skeptics, and bettors are what make an event grand; (d) let the world REPRICE afterwards \u2014 the episode ends when specific people have visibly updated what they believe, want, or plan because of what happened, not when the event itself ends. The player wants to be surprised by HOW it unfolds \u2014 add twists, complications, and specifics the seed does not spell out, and honor the intensity the seed implies. If a previous episode directive is provided, treat it as concluded and carry its consequences into this one. If the seed conflicts with established canon in [STORY MEMORY], honor the intent of the seed while bending the execution to fit canon. Still include the ARC line, advancing the previous ARC wherever the seed allows.');
         }
+        if (mode === 'restart') {
+            extra.push('The player RESTARTED this episode: the DISCARDED DIRECTIVE provided was rejected and is being thrown out. Two rules govern this. (1) NOTHING IN IT HAPPENED \u2014 it never aired, none of it is canon, and no beat, outcome, or consequence from it may be treated as established or referenced as past events; you are writing from the same story position it was written from, not from after it. (2) GENUINELY DIFFERENT \u2014 do not repeat its premise, its centerpiece, its episode shape, its dilemma, or its intensity; if it ran on a duel, a confrontation, or an investigation, reach for a different engine entirely, and put different characters at the center where the story allows. The player rejected it, so a variation on the same idea is a failure \u2014 they want the road not taken. Same episode number, same continuity, same ARC \u2014 advanced by a different route.');
+        }
         if (mode === 'edit') {
             extra.push('The CURRENT directive and the player\'s direction instruction are provided. Rewrite the directive to incorporate the player\'s direction while preserving whatever still works. Keep the same episode. If no current directive is provided, write a fresh one built around the player\'s direction.');
         }
@@ -3046,11 +3049,16 @@
         const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
+            // 'new' over a live directive IS a restart: same episode number, but the
+            // model must SEE what it is replacing or it can hand back the same episode.
+            // The discarded text is passed as never-aired \u2014 never as concluded history.
+            const isRestart = mode === 'new' && !!String(prev?.text || '').trim();
             const baseUser = buildContextBlock().replace(/\[EPISODE_END\]/g, '') + (await worldRulesBlock())
                 + ((mode === 'next' || mode === 'seed') && prev?.text ? '\n\n[PREVIOUS EPISODE DIRECTIVE \u2014 concluded]\n' + prev.text : '')
+                + (isRestart ? '\n\n[DISCARDED DIRECTIVE \u2014 rejected by the player, never aired, not canon]\n' + prev.text : '')
                 + (mode === 'seed' ? '\n\n[PLAYER\'S EPISODE SEED]\n' + String(seedText || '').trim() : '');
             const sp = await callLLMSmart([
-                { role: 'system', content: directorAuthorPrompt(mode) },
+                { role: 'system', content: directorAuthorPrompt(isRestart ? 'restart' : mode) },
                 { role: 'user', content: baseUser + '\n\nWrite the director\'s note now.' },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
@@ -3061,7 +3069,7 @@
                 // Second draft: the showrunner pass. The draft goes back in with the
                 // same context; the reviewer's cut is what ships.
                 const sp2 = await callLLMSmart([
-                    { role: 'system', content: SHOWRUNNER_PASS_PROMPT },
+                    { role: 'system', content: SHOWRUNNER_PASS_PROMPT + (isRestart ? '\nThis episode is a RESTART: the [DISCARDED DIRECTIVE] in the context was rejected by the player and never aired \u2014 none of it is canon. Your cut must not drift back toward it, reuse its premise or centerpiece, or treat any of its events as having happened.' : '') },
                     { role: 'user', content: baseUser + '\n\n[DRAFT DIRECTIVE \u2014 the staff writer\'s first pass]\n' + text + '\n\nProduce the final improved directive now.' },
                 ]);
                 if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
@@ -3077,7 +3085,9 @@
             applyInjections();
             const note = mode === 'seed'
                 ? '\uD83C\uDFAC Episode ' + ep + ' built around your seed. Beats hidden \u2014 just keep playing (\uD83C\uDFAC Peek to spoil yourself).'
-                : (isAuto ? '\uD83C\uDFAC Auto \u2014 directive set (episode ' : '\uD83C\uDFAC Directive set (episode ') + ep + '). Content hidden \u2014 just keep playing.';
+                : isRestart
+                    ? '\uD83C\uDFAC Episode ' + ep + ' restarted \u2014 the old directive is discarded and a deliberately different episode is set. Content hidden \u2014 just keep playing.'
+                    : (isAuto ? '\uD83C\uDFAC Auto \u2014 directive set (episode ' : '\uD83C\uDFAC Directive set (episode ') + ep + '). Content hidden \u2014 just keep playing.';
             addBubble('note', note);
             pushHistory('note', note);
             updateSub();
@@ -3485,7 +3495,7 @@
             '  <div id="cc_quick">',
             '    <div style="display:flex;gap:6px;flex-wrap:wrap;">',
             '      <button class="cc_btn" id="cc_audit" title="Full continuity audit">\uD83D\uDD0D Audit</button>',
-            '      <button class="cc_btn" id="cc_dirnew" title="Set or replace the secret episode directive">\uD83C\uDFAC New</button>',
+            '      <button class="cc_btn" id="cc_dirnew" title="Set the secret episode directive">\uD83C\uDFAC New</button>',
             '      <button class="cc_btn" id="cc_dirnext" title="Conclude this episode and direct the next">\uD83C\uDFAC Next</button>',
             '      <button class="cc_btn" id="cc_dirseed" title="Co-write: seed the next episode with your own premise">\uD83C\uDFAC Seed</button>',
             '      <button class="cc_btn" id="cc_dirstat" title="Spoiler-free episode progress check">\uD83C\uDFAC ?</button>',
@@ -4222,6 +4232,16 @@
         const count = Array.isArray(c.chat) ? c.chat.length : 0;
         const d = metaRoot().director;
         sub.textContent = 'v' + VERSION + ' · ' + count + ' messages' + (d ? ' · \uD83C\uDFAC E' + d.episode + (d.concluded ? ' \u2713' : '') : '');
+        // One button, honest label: with no directive it sets the first one; with a
+        // live directive the same action restarts that episode, so it says so.
+        const nb = el('cc_dirnew');
+        if (nb) {
+            const live = !!String(d?.text || '').trim();
+            nb.textContent = live ? '\uD83C\uDFAC Restart' : '\uD83C\uDFAC New';
+            nb.title = live
+                ? 'Restart episode ' + d.episode + ' \u2014 throw out this directive and rewrite the episode with a deliberately different take. Same episode number; nothing from the discarded version counts as canon.'
+                : 'Set the secret episode directive';
+        }
     }
 
     function togglePanel(force) {

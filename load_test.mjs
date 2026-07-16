@@ -55,9 +55,13 @@ function makeEl(tag) {
         removeChild: (c) => { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); return c; },
         remove: () => {},
         insertBefore: (c) => { el.children.unshift(c); return c; },
-        addEventListener: () => {}, removeEventListener: () => {},
+        _on: new Map(),
+        addEventListener: (t, fn) => { if (!el._on.has(t)) el._on.set(t, []); el._on.get(t).push(fn); },
+        removeEventListener: (t, fn) => { const a = el._on.get(t) || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+        dispatch: (t, ev) => { for (const fn of (el._on.get(t) || []).slice()) fn(ev || { target: el, preventDefault() {}, stopPropagation() {} }); },
         querySelector: () => null, querySelectorAll: () => [],
-        closest: () => null, focus: () => {}, blur: () => {}, click: () => {},
+        closest: () => null, focus: () => {}, blur: () => {},
+        click: () => el.dispatch('click'),
         getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 100, right: 100, bottom: 100 }),
         scrollIntoView: () => {},
         options: [], value: '', checked: false, disabled: false, selected: false,
@@ -219,6 +223,8 @@ ok(SRC.includes('CAST \\u2014 before writing beats, sweep the established cast')
 ok(SRC.includes('FURNITURE CHARACTERS'), 'critique bar catches furniture characters and absent stakeholders');
 ok(SRC.includes('SHOWRUNNER running the second-draft pass'), 'directives get a showrunner second-draft pass (premise ambition, the memorable moment, wasted cast, safety, logic)');
 ok(SRC.includes('directorTwoPass: true'), 'the second-draft pass defaults ON');
+ok(SRC.includes("const isRestart = mode === 'new' && !!String(prev?.text || '').trim();"), 'New over a live directive is treated as a restart');
+ok(SRC.includes('The player RESTARTED this episode'), 'restart carries its own prompt contract (never aired / genuinely different)');
 ok(SRC.includes('critiqueOnEpisode: true'), 'episode-end auto-critique defaults ON');
 const fnAt = SRC.indexOf('async function onEpisodeConcluded(chatAt)');
 ok(fnAt > -1, 'episode conclusion routes through onEpisodeConcluded');
@@ -272,6 +278,44 @@ ok(String(ctx.chatMetadata.cc_critique || '').startsWith('NORTH STAR:'), 'the re
 const dNow = (ctx.chatMetadata['continuityCopilot'] || {}).director || {};
 ok(dNow.episode === 2 && !dNow.concluded, 'auto mode chained to a live episode 2 after the review (got E' + dNow.episode + (dNow.concluded ? ' concluded' : '') + ')');
 ok(String(dNow.text || '').includes('SHOWRUNNER CUT'), 'the STORED directive is the showrunner cut, not the first draft');
+
+console.log('== v2.55.0 behavior: restart keeps the episode, discards the old take ==');
+// Arrange: a live, unconcluded E2 directive, then press New (= Restart).
+// The mock records the SYSTEM and USER prompts of both passes so we can prove
+// what the model was actually told, not merely what the source says.
+llmCalls.length = 0;
+let capturedDraft = null, capturedReview = null;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const sys = (messages && messages[0] && messages[0].content) || '';
+        const usr = (messages && messages[1] && messages[1].content) || '';
+        if (sys.includes('SHOWRUNNER running the second-draft pass')) {
+            llmCalls.push('review'); capturedReview = { sys, usr };
+            return 'Intensity: intense\nRESTARTED CUT: the tribunal nobody called for.';
+        }
+        llmCalls.push('directive'); capturedDraft = { sys, usr };
+        return 'Intensity: intense\n1. EPISODE PREMISE — a tribunal, not a duel.';
+    },
+};
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'OLD E2: the duel on the welcome-day grounds.', episode: 2, concluded: false, ts: 5 }, directorEp: 2 };
+for (const f of handlers.get('CHAT_CHANGED') || []) await f(); // refresh the label from the live directive
+ok(document.getElementById('cc_dirnew').textContent.includes('Restart'), 'with a live directive the button reads Restart');
+console.log = logCap;
+try { document.getElementById('cc_dirnew').click(); await new Promise(r => setTimeout(r, 250)); } catch (e) { errors.push('restart click threw: ' + (e && e.message)); }
+console.log = realLog;
+ok(!errors.some(x => x.includes('restart click threw')), 'the New/Restart button ran without throwing');
+ok(capturedDraft && capturedDraft.sys.includes('The player RESTARTED this episode'), 'restart draft used the restart prompt contract, not the plain new-episode prompt');
+ok(capturedDraft && capturedDraft.usr.includes('[DISCARDED DIRECTIVE') && capturedDraft.usr.includes('OLD E2: the duel'), 'the rejected directive WAS shown to the model (without it, a restart can return the same episode)');
+ok(capturedDraft && !capturedDraft.usr.includes('[PREVIOUS EPISODE DIRECTIVE'), 'the discarded episode is NOT passed as concluded history — it never aired');
+ok(capturedReview && capturedReview.sys.includes('This episode is a RESTART'), 'the showrunner pass inherits the restart contract and cannot drift back to the rejected episode');
+const dR = (ctx.chatMetadata['continuityCopilot'] || {}).director || {};
+ok(dR.episode === 2, 'restart KEPT the episode number (got E' + dR.episode + ', want E2)');
+ok(!dR.concluded, 'restart leaves the episode live, not concluded');
+ok(String(dR.text || '').includes('RESTARTED CUT'), 'the restarted directive replaced the old text');
+// Label honesty: the same button must read Restart while a directive is live.
+ctx.chatMetadata['continuityCopilot'] = {};
+for (const f of handlers.get('CHAT_CHANGED') || []) await f(); // the real refresh path
+ok(document.getElementById('cc_dirnew').textContent.includes('New'), 'with no directive the same button reads New');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
