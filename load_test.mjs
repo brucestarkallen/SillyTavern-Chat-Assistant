@@ -214,7 +214,9 @@ ok(SRC.includes('CRAFT \\u2014 the difference between competent and masterpiece'
 ok(SRC.includes('STACK MEANING before the centerpiece'), 'seed mode expands premises showrunner-style (meaning stack / phases / population / reprice)');
 ok(SRC.includes('NORTH STAR:'), 'critique output contract opens with the single highest-leverage NORTH STAR lever');
 ok(SRC.includes('FRICTIONLESS SUCCESS'), 'critique holds the story to the masterpiece bar, not only the defect floor');
-ok(SRC.includes('LEGACY_DIRECTOR_PROMPT_V248, LEGACY_DIRECTOR_PROMPT_V251];'), 'stored 2.49-2.51 default prompt auto-upgrades to the CRAFT default');
+ok(SRC.includes('LEGACY_DIRECTOR_PROMPT_V248, LEGACY_DIRECTOR_PROMPT_V251, LEGACY_DIRECTOR_PROMPT_V252];'), 'stored 2.49-2.52 defaults auto-upgrade to the current default');
+ok(SRC.includes('CAST \\u2014 before writing beats, sweep the established cast'), 'director default carries the CAST law (stake sweep, jurisdiction-by-definition, no furniture placement)');
+ok(SRC.includes('FURNITURE CHARACTERS'), 'critique bar catches furniture characters and absent stakeholders');
 ok(SRC.includes('critiqueOnEpisode: true'), 'episode-end auto-critique defaults ON');
 const fnAt = SRC.indexOf('async function onEpisodeConcluded(chatAt)');
 ok(fnAt > -1, 'episode conclusion routes through onEpisodeConcluded');
@@ -228,6 +230,7 @@ ok(!SRC.includes('maybeAutoDirector(); // auto mode: chain the next episode imme
 const CA = ctx.extensionSettings['continuityCopilot'] || {};
 ok(CA.critiqueOnEpisode === true, 'live settings after init: critiqueOnEpisode is true');
 ok(typeof CA.directorPrompt === 'string' && CA.directorPrompt.includes('CRAFT \u2014 the difference between competent and masterpiece'), 'live settings after init: director prompt is the CRAFT default');
+ok(typeof CA.directorPrompt === 'string' && CA.directorPrompt.includes('CAST \u2014 before writing beats'), 'live settings after init: director prompt carries the CAST law');
 // The MESSAGE_RECEIVED handler (which hosts the conclusion chain) must survive a bare invoke.
 threw = '';
 try { for (const f of handlers.get('MESSAGE_RECEIVED') || []) await f(0); } catch (e) { threw = e && e.message; }
