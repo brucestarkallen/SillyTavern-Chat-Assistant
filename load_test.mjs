@@ -217,6 +217,8 @@ ok(SRC.includes('FRICTIONLESS SUCCESS'), 'critique holds the story to the master
 ok(SRC.includes('LEGACY_DIRECTOR_PROMPT_V248, LEGACY_DIRECTOR_PROMPT_V251, LEGACY_DIRECTOR_PROMPT_V252];'), 'stored 2.49-2.52 defaults auto-upgrade to the current default');
 ok(SRC.includes('CAST \\u2014 before writing beats, sweep the established cast'), 'director default carries the CAST law (stake sweep, jurisdiction-by-definition, no furniture placement)');
 ok(SRC.includes('FURNITURE CHARACTERS'), 'critique bar catches furniture characters and absent stakeholders');
+ok(SRC.includes('SHOWRUNNER running the second-draft pass'), 'directives get a showrunner second-draft pass (premise ambition, the memorable moment, wasted cast, safety, logic)');
+ok(SRC.includes('directorTwoPass: true'), 'the second-draft pass defaults ON');
 ok(SRC.includes('critiqueOnEpisode: true'), 'episode-end auto-critique defaults ON');
 const fnAt = SRC.indexOf('async function onEpisodeConcluded(chatAt)');
 ok(fnAt > -1, 'episode conclusion routes through onEpisodeConcluded');
@@ -231,6 +233,7 @@ const CA = ctx.extensionSettings['continuityCopilot'] || {};
 ok(CA.critiqueOnEpisode === true, 'live settings after init: critiqueOnEpisode is true');
 ok(typeof CA.directorPrompt === 'string' && CA.directorPrompt.includes('CRAFT \u2014 the difference between competent and masterpiece'), 'live settings after init: director prompt is the CRAFT default');
 ok(typeof CA.directorPrompt === 'string' && CA.directorPrompt.includes('CAST \u2014 before writing beats'), 'live settings after init: director prompt carries the CAST law');
+ok(CA.directorTwoPass === true, 'live settings after init: directorTwoPass is true');
 // The MESSAGE_RECEIVED handler (which hosts the conclusion chain) must survive a bare invoke.
 threw = '';
 try { for (const f of handlers.get('MESSAGE_RECEIVED') || []) await f(0); } catch (e) { threw = e && e.message; }
@@ -245,6 +248,7 @@ ctx.ConnectionManagerRequestService = {
     sendRequest: async (pid, messages) => {
         const sys = (messages && messages[0] && messages[0].content) || '';
         if (sys.includes('NORTH STAR')) { llmCalls.push('critique'); return 'NORTH STAR: play the irony gap harder.\n1. Track every named character present until they visibly exit.'; }
+        if (sys.includes('SHOWRUNNER running the second-draft pass')) { llmCalls.push('review'); return 'Intensity: standard\nSHOWRUNNER CUT: the rematch everyone bet against — now with the registrar in the ring.'; }
         if (sys.includes('expert story director')) { llmCalls.push('directive'); return 'Intensity: standard\n1. EPISODE PREMISE — the rematch everyone bet against.'; }
         llmCalls.push('other'); return 'ONGOING \u2014 fine';
     },
@@ -263,9 +267,11 @@ console.log = realLog;
 ok(!errors.some(x => x.includes('sim handler threw')), 'conclusion handler ran the sim without throwing');
 ok(llmCalls[0] === 'critique', 'the EDITOR pass fired first (got order: ' + llmCalls.join(', ') + ')');
 ok(llmCalls[1] === 'directive', 'the NEXT directive fired second — designed with the fresh notes already saved');
+ok(llmCalls[2] === 'review', 'the showrunner pass fired third — draft in, cut out');
 ok(String(ctx.chatMetadata.cc_critique || '').startsWith('NORTH STAR:'), 'the review landed in cc_critique under the NORTH STAR contract');
 const dNow = (ctx.chatMetadata['continuityCopilot'] || {}).director || {};
 ok(dNow.episode === 2 && !dNow.concluded, 'auto mode chained to a live episode 2 after the review (got E' + dNow.episode + (dNow.concluded ? ' concluded' : '') + ')');
+ok(String(dNow.text || '').includes('SHOWRUNNER CUT'), 'the STORED directive is the showrunner cut, not the first draft');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');

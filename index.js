@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.53.0';
+    const VERSION = '2.54.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -278,6 +278,22 @@
         'Rules: the note guides, never railroads \u2014 the storyteller must adapt beats to the player\'s choices; conclude naturally at the landing. An episode spans multiple scenes \u2014 never compress its whole arc into one scene, never pad past the landing. Under 340 words. Output ONLY the director\'s note text, no preamble.',
     ].join('\n');
 
+    // Second-draft pass: a rule list can only catch failures someone already
+    // enumerated. This pass makes the model apply its whole corpus of story
+    // judgment against a CONCRETE draft \u2014 the mechanism that catches the
+    // unenumerated misses (the wasted character, the safe premise, the missing
+    // memorable scene) the way a real writers' room does.
+    const SHOWRUNNER_PASS_PROMPT = [
+        'You are the SHOWRUNNER running the second-draft pass on a secret episode directive for a long-form roleplay. A staff writer drafted it from the same story context you have. Your job: make it the version a top writers\' room would air. Judge it against the best episodes you know from television, film, and anime \u2014 the ones that made audiences sit up \u2014 and steal their craft, never their content.',
+        'Interrogate the draft ruthlessly:',
+        '1. PREMISE \u2014 is this the most interesting version available, or merely the first one that came to mind? What would the masterpiece version of this exact premise do that the draft does not? If the answer is anything, do it.',
+        '2. THE MOMENT \u2014 point to the single scene the audience will remember and retell. If you cannot point to it, build it.',
+        '3. THE CAST \u2014 which established character would a devoted viewer be angry is missing, wasted, or reduced to standing around? Whose stakes does this premise touch that the draft ignores? Give them their move, or the world\'s stated reason for their absence.',
+        '4. SAFETY \u2014 where does the draft play safe: a predictable beat, an unearned convenience, a dilemma whose cost will not really hurt, an antagonist making a weak move? Sharpen every instance.',
+        '5. LOGIC \u2014 does every element obey the world\'s own rules, established canon, and the format contract (intensity line; premise; beats with a TURN and a final DILEMMA; NPC & world initiative; landing; hook; arc)? Fix what breaks. Secrecy stays intact.',
+        'Rewrite discipline: keep everything that already works \u2014 this is a pass, not a do-over. Same format, same length limit, same tone. If the draft honors a player seed, the seed\'s intent remains untouchable. Output ONLY the final improved directive text \u2014 no commentary, no comparison, no preamble.',
+    ].join('\n');
+
     const defaults = {
         profileId: '',
         recentFull: 8,
@@ -302,6 +318,7 @@
         autoRehide: true,
         critiqueAuto: 0,
         critiqueOnEpisode: true,
+        directorTwoPass: true,
         directorMode: 'off', // 'off' | 'auto' | 'cowriter'
         shortcuts: DEFAULT_SHORTCUTS,
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -3029,18 +3046,30 @@
         const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
-            const user = buildContextBlock().replace(/\[EPISODE_END\]/g, '') + (await worldRulesBlock())
+            const baseUser = buildContextBlock().replace(/\[EPISODE_END\]/g, '') + (await worldRulesBlock())
                 + ((mode === 'next' || mode === 'seed') && prev?.text ? '\n\n[PREVIOUS EPISODE DIRECTIVE \u2014 concluded]\n' + prev.text : '')
-                + (mode === 'seed' ? '\n\n[PLAYER\'S EPISODE SEED]\n' + String(seedText || '').trim() : '')
-                + '\n\nWrite the director\'s note now.';
+                + (mode === 'seed' ? '\n\n[PLAYER\'S EPISODE SEED]\n' + String(seedText || '').trim() : '');
             const sp = await callLLMSmart([
                 { role: 'system', content: directorAuthorPrompt(mode) },
-                { role: 'user', content: user },
+                { role: 'user', content: baseUser + '\n\nWrite the director\'s note now.' },
             ]);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
-            const text = sp.rest.trim();
+            let text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
+            if (settings.directorTwoPass !== false && mode !== 'edit') {
+                // Second draft: the showrunner pass. The draft goes back in with the
+                // same context; the reviewer's cut is what ships.
+                const sp2 = await callLLMSmart([
+                    { role: 'system', content: SHOWRUNNER_PASS_PROMPT },
+                    { role: 'user', content: baseUser + '\n\n[DRAFT DIRECTIVE \u2014 the staff writer\'s first pass]\n' + text + '\n\nProduce the final improved directive now.' },
+                ]);
+                if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
+                if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
+                const polished = sp2.rest.trim();
+                if (polished) text = polished;
+                else console.warn(LOG, 'showrunner pass returned empty \u2014 shipping the first draft');
+            }
             const ep = computeEpisodeNumber(mode, prev?.episode, metaRoot().directorEp);
             metaRoot().director = { text, episode: ep, ts: Date.now() };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
@@ -3629,6 +3658,7 @@
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
             '<label>Auto-critique: run the editor every N storyteller replies (0 = off; needs a Connection Profile)</label>',
             '<input type="number" id="cc_crit_auto" min="0" max="100">',
+            '<div class="cc_check"><input type="checkbox" id="cc_dir_twopass"><span>Director second-draft pass \u2014 every directive is drafted, then rewritten by a showrunner review (best quality; two model calls per episode)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_crit_ep"><span>Auto-critique when an episode concludes \u2014 the editor reviews each aired episode; in Auto director mode the next episode is then designed with the fresh notes (needs a Connection Profile)</span></div>',
             '<label>Director mode</label>',
             '<select id="cc_dir_mode">',
@@ -3676,6 +3706,7 @@
         el('cc_dir_anchors').value = settings.directorAnchors || '';
         el('cc_crit_auto').value = settings.critiqueAuto;
         el('cc_crit_ep').checked = settings.critiqueOnEpisode !== false;
+        el('cc_dir_twopass').checked = settings.directorTwoPass !== false;
         el('cc_dir_mode').value = ['off', 'auto', 'cowriter'].includes(settings.directorMode) ? settings.directorMode : 'off';
         el('cc_wi_enable').checked = !!settings.wiEnable;
         el('cc_wi_books').value = settings.wiBooks || '';
@@ -3705,6 +3736,7 @@
             settings.directorAnchors = el('cc_dir_anchors').value;
             settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
             settings.critiqueOnEpisode = el('cc_crit_ep').checked;
+            settings.directorTwoPass = el('cc_dir_twopass').checked;
             settings.directorMode = el('cc_dir_mode').value || 'off';
             settings.wiEnable = el('cc_wi_enable').checked;
             settings.wiBooks = el('cc_wi_books').value;
