@@ -105,6 +105,11 @@ try { globalThis.navigator = { userAgent: 'gate' }; } catch (e) { /* node >= 21 
 // Toasts are user-visible feedback; capture them so 'loud, never silent'
 // behavior is provable instead of vanishing into a no-op.
 const toasts = [];
+// Dialogs: confirm/prompt were previously undefined — End season was
+// undriveable in the harness. Auto-accept and record.
+const confirms = [];
+globalThis.confirm = (m) => { confirms.push(String(m)); return true; };
+globalThis.prompt = globalThis.prompt || (() => '');
 const _t = (m) => { toasts.push(String(m)); };
 globalThis.toastr = { info: _t, success: _t, warning: _t, error: _t, clear: () => {} };
 globalThis.localStorage = {
@@ -235,6 +240,9 @@ ok(SRC.includes('llmTimeoutSec: 300'), 'stall timeout defaults to 300s and is co
 ok(SRC.includes('function busyTicker('), 'busy bubbles carry a liveness ticker');
 ok((SRC.match(/busyTicker\(busyNote/g) || []).length === 5, 'all five LLM flows (directive, critique, status, seeds, edit) tick (found ' + (SRC.match(/busyTicker\(busyNote/g) || []).length + ', need 5)');
 ok((SRC.match(/\], tick(C|X)?\.onPartial\);/g) || []).length >= 6, 'every ticked flow forwards live stream progress into the readout');
+ok(SRC.includes('PLAYED-STATE: NEVER PLAYED'), 'end-season audit declares an unplayed directive as such (anti-spiral)');
+ok(SRC.includes('a clean audit is a successful audit'), 'the audit has an explicit clean exit so it never manufactures findings');
+ok((SRC.match(/msgAt:/g) || []).length === 2, 'both directive stores record where playtime starts (found ' + (SRC.match(/msgAt:/g) || []).length + ', need 2)');
 ok(!/if \(running\) return;\s*\n\s*running = true/.test(SRC), 'no user-initiated entry can die silently at the running flag any more');
 ok(SRC.includes('critiqueOnEpisode: true'), 'episode-end auto-critique defaults ON');
 const fnAt = SRC.indexOf('async function onEpisodeConcluded(chatAt)');
@@ -413,6 +421,42 @@ ok(sawPhase2, 'the phase label flipped to the showrunner second draft mid-flow')
 ok(sawCountdown, 'the watchdog countdown is visible, so a silent provider has a visible fuse');
 ok(!leakedContent, 'secrecy held: the readout showed counts, never directive content');
 ok(String((ctx.chatMetadata['continuityCopilot'].director || {}).text || '').includes('TICKED CUT'), 'the streamed restart completed and stored the showrunner cut');
+
+console.log('== v2.58.0 behavior: end-season audit knows how much actually aired ==');
+// Case 1: the directive stored by the previous sim was never played (no
+// storyteller replies were appended after it was set). Ending the season must
+// tell the audit NEVER PLAYED and forbid chat-searching.
+let auditPrompt = null;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const usr = (messages && messages[messages.length - 1] && messages[messages.length - 1].content) || '';
+        if (/PLAYED-STATE:/.test(usr)) auditPrompt = usr;
+        return 'Nothing references the dead plan.';
+    },
+};
+console.log = logCap;
+document.getElementById('cc_diroff').click();
+await sleep(400);
+console.log = realLog;
+ok(confirms.length > 0, 'End season asked for confirmation through the real dialog');
+ok(auditPrompt !== null, 'the residue audit fired through the normal pipeline');
+ok(/PLAYED-STATE: NEVER PLAYED/.test(String(auditPrompt)), 'an unplayed directive is declared NEVER PLAYED to the audit');
+ok(/do not search the chat for them/.test(String(auditPrompt)), 'the audit is told chat absence is expected — no spiraling on missing beats');
+ok(/episode 2/.test(String(auditPrompt)), 'the audit names the exact cleared episode, not "the season"');
+ok(/earlier episodes of this season genuinely aired/i.test(String(auditPrompt)), 'season history is fenced off from the audit scope');
+ok((ctx.chatMetadata['continuityCopilot'] || {}).director === null, 'the directive was cleared');
+// Case 2: a partially played directive — two storyteller replies after set.
+auditPrompt = null;
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'E1 partial plan.', episode: 1, concluded: false, ts: 12, msgAt: ctx.chat.length }, directorEp: 1 };
+ctx.chat.push({ is_user: false, mes: 'Reply one under the plan.' });
+ctx.chat.push({ is_user: false, mes: 'Reply two under the plan.' });
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+console.log = logCap;
+document.getElementById('cc_diroff').click();
+await sleep(400);
+console.log = realLog;
+ok(/PLAYED-STATE: PARTIALLY PLAYED \u2014 about 2 storyteller replies/.test(String(auditPrompt)), 'a half-played directive reports its real reply count to the audit');
+ok(/narrated on screen is history and stays/.test(String(auditPrompt)), 'partial audits protect what actually aired');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');

@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.57.0';
+    const VERSION = '2.58.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3126,7 +3126,7 @@
                 else console.warn(LOG, 'showrunner pass returned empty \u2014 shipping the first draft');
             }
             const ep = computeEpisodeNumber(mode, prev?.episode, metaRoot().directorEp);
-            metaRoot().director = { text, episode: ep, ts: Date.now() };
+            metaRoot().director = { text, episode: ep, ts: Date.now(), msgAt: Array.isArray(ctx().chat) ? ctx().chat.length : 0 };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
             applyInjections();
@@ -3166,6 +3166,16 @@
         if (!d) { toast('No directive active.', 'warning'); return; }
         if (!confirm('End the current season? This removes the secret directive and resets episode numbering \u2014 the next episode will be Episode 1. I\'ll then audit story memory for residue from planned-but-unplayed beats and propose removals as cards. (To pause the Director without resetting, switch its mode to Off in settings.)')) return;
         const clearedText = String(d.text || '');   // captured BEFORE nulling — the audit needs to know what was planned
+        // Classify how much of this directive actually AIRED, deterministically,
+        // before clearing. The audit prompt used to claim 'the season just ended'
+        // with no played-state at all — so on an unplayed directive the model
+        // searched the chat for beats that were never narrated and spiraled on
+        // the absence. The extension knows the answer; now it says it.
+        const chatArr = Array.isArray(ctx().chat) ? ctx().chat : [];
+        const at = Number(d.msgAt);
+        const replies = Number.isFinite(at) ? chatArr.slice(Math.max(0, at)).filter(m => m && !m.is_user && !m.is_system).length : null;
+        const playedState = d.concluded ? 'concluded' : replies === null ? 'unknown' : replies === 0 ? 'unplayed' : 'partial';
+        const clearedEp = d.episode || 1;
         metaRoot().director = null;
         metaRoot().directorEp = 0;          // season over: numbering restarts at 1
         delete metaRoot().cowriterNudged;   // fresh season gets a fresh co-writer nudge
@@ -3182,7 +3192,15 @@
             if (running) {
                 addBubble('note', 'Copilot is busy \u2014 when it finishes, say "audit memory for leftovers from the cleared season" and I\'ll scan then.');
             } else {
-                send('The season just ended and its secret directive (below) was cleared. Audit story memory \u2014 ledger entries, open threads, notepad, summaries \u2014 for residue describing this directive\'s planned-but-unplayed beats: events, notices, scenes, or agendas that were PLANNED but never actually narrated on screen. Compare against what the chat actually shows (fetch messages if previews are not enough). Propose removals or corrections as memory-edit cards; also propose chat edits to scrub any machine-note blocks in messages that still carry the dead plan. Do not touch memory that reflects events that truly happened.\n\n[CLEARED DIRECTIVE]\n' + clearedText);
+                const head = 'The player ended the season. Only the FINAL episode\'s secret directive (episode ' + clearedEp + ') is being cleared \u2014 it is quoted below. Earlier episodes of this season genuinely aired; their recorded history is real and untouchable. The only audit target is text that still describes THIS cleared directive\'s planned-but-unplayed content \u2014 in ledger entries, open threads, the notepad, and summaries.';
+                const stateLine = playedState === 'unplayed'
+                    ? 'PLAYED-STATE: NEVER PLAYED \u2014 zero storyteller replies aired under this directive. The chat contains NO trace of these beats, and that absence is expected and correct: do not search the chat for them, and do not investigate or narrate why they are missing. Only check story memory, open threads, and the notepad for text referencing the planned beats (a plan-aware note can exist even though nothing aired) and propose removals; chat messages cannot carry this plan, so no chat edits are needed.'
+                    : playedState === 'partial'
+                        ? 'PLAYED-STATE: PARTIALLY PLAYED \u2014 about ' + replies + ' storyteller repl' + (replies === 1 ? 'y' : 'ies') + ' aired under it before the season ended. Whatever was actually narrated on screen is history and stays; scrub only references to the planned remainder that never aired. Compare against what the chat actually shows (fetch messages if previews are not enough), and also propose chat edits to scrub machine-note blocks that still carry the dead plan.'
+                        : playedState === 'concluded'
+                            ? 'PLAYED-STATE: CONCLUDED \u2014 this episode ran to its end, so most of its plan likely aired. Compare the plan against what the chat actually shows (fetch messages if previews are not enough); scrub only planned beats that never made it on screen, and propose chat edits to scrub machine-note blocks that still carry dead plan fragments.'
+                            : 'PLAYED-STATE: UNKNOWN \u2014 it is not recorded how much of this directive aired. Compare the plan against what the chat actually shows (fetch messages if previews are not enough) before touching anything; scrub only what was planned but never narrated, and propose chat edits to scrub machine-note blocks that still carry the dead plan.';
+                send(head + '\n' + stateLine + '\nPropose removals or corrections as memory-edit cards. Never touch memory that reflects events that truly happened. If nothing references the dead plan, say exactly that in one line and produce zero cards \u2014 a clean audit is a successful audit, not a failure to find something.\n\n[CLEARED DIRECTIVE \u2014 episode ' + clearedEp + ']\n' + clearedText);
             }
         }
     }
@@ -3209,7 +3227,7 @@
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty directive');
             const ep = prev?.episode || 1;
-            metaRoot().director = { text, episode: ep, ts: Date.now() };
+            metaRoot().director = { text, episode: ep, ts: Date.now(), msgAt: prev?.msgAt };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
             applyInjections();
