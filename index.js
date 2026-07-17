@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.56.0';
+    const VERSION = '2.57.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3000,6 +3000,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', reason === 'episode' ? 'editor reviewing the concluded episode\u2026' : isAuto ? 'auto-editor reviewing the story\u2026' : 'the editor is reviewing\u2026');
+        const tickC = busyTicker(busyNote, reason === 'episode' ? 'editor reviewing the concluded episode' : isAuto ? 'auto-editor reviewing the story' : 'the editor is reviewing');
         const chatAt = chatRef();
         try {
             const c = ctx();
@@ -3021,7 +3022,7 @@
             const sp = await callLLMSmart([
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
-            ]);
+            ], tickC.onPartial);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 critique unchanged.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-review \u2014 critique for the previous chat discarded.'); return; }
             const text = sp.rest.trim();
@@ -3036,6 +3037,7 @@
         } catch (err) {
             addBubble('note', 'Critique error: ' + (err?.message || err));
         } finally {
+            tickC.stop();
             busyNote.remove();
             running = false;
             setBusy(false);
@@ -3089,6 +3091,7 @@
         setBusy(true);
         const busyNote = addBubble('busy', mode === 'seed' ? 'directing your episode\u2026' : mode === 'next' ? 'directing the next episode\u2026' : 'directing\u2026');
         const chatAt = chatRef();
+        let tick = null;
         try {
             const prev = metaRoot().director;
             // 'new' over a live directive IS a restart: same episode number, but the
@@ -3099,10 +3102,11 @@
                 + ((mode === 'next' || mode === 'seed') && prev?.text ? '\n\n[PREVIOUS EPISODE DIRECTIVE \u2014 concluded]\n' + prev.text : '')
                 + (isRestart ? '\n\n[DISCARDED DIRECTIVE \u2014 rejected by the player, never aired, not canon]\n' + prev.text : '')
                 + (mode === 'seed' ? '\n\n[PLAYER\'S EPISODE SEED]\n' + String(seedText || '').trim() : '');
+            tick = busyTicker(busyNote, (isRestart ? 'restarting episode \u2014 fresh draft' : mode === 'seed' ? 'directing your episode \u2014 draft' : mode === 'next' ? 'directing the next episode \u2014 draft' : 'directing \u2014 draft'));
             const sp = await callLLMSmart([
                 { role: 'system', content: directorAuthorPrompt(isRestart ? 'restart' : mode) },
                 { role: 'user', content: baseUser + '\n\nWrite the director\'s note now.' },
-            ]);
+            ], tick.onPartial);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
             let text = sp.rest.trim();
@@ -3110,10 +3114,11 @@
             if (settings.directorTwoPass !== false && mode !== 'edit') {
                 // Second draft: the showrunner pass. The draft goes back in with the
                 // same context; the reviewer's cut is what ships.
+                tick.phase('showrunner second draft');
                 const sp2 = await callLLMSmart([
                     { role: 'system', content: SHOWRUNNER_PASS_PROMPT + (isRestart ? '\nThis episode is a RESTART: the [DISCARDED DIRECTIVE] in the context was rejected by the player and never aired \u2014 none of it is canon. Your cut must not drift back toward it, reuse its premise or centerpiece, or treat any of its events as having happened.' : '') },
                     { role: 'user', content: baseUser + '\n\n[DRAFT DIRECTIVE \u2014 the staff writer\'s first pass]\n' + text + '\n\nProduce the final improved directive now.' },
-                ]);
+                ], tick.onPartial);
                 if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
                 if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-generation \u2014 the directive belonged to the previous chat and was discarded.'); return; }
                 const polished = sp2.rest.trim();
@@ -3136,6 +3141,7 @@
         } catch (err) {
             addBubble('note', 'Director error: ' + (err?.message || err));
         } finally {
+            tick?.stop();
             busyNote.remove();
             running = false;
             setBusy(false);
@@ -3186,6 +3192,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'revising the directive\u2026');
+        const tickX = busyTicker(busyNote, 'revising the directive around your direction');
         const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
@@ -3196,7 +3203,7 @@
             const sp = await callLLMSmart([
                 { role: 'system', content: directorAuthorPrompt('edit') },
                 { role: 'user', content: user },
-            ]);
+            ], tickX.onPartial);
             if (stopRequested) { addBubble('note', 'Stopped \u2014 directive unchanged.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed mid-revision \u2014 the directive belonged to the previous chat and was discarded.'); return; }
             const text = sp.rest.trim();
@@ -3213,6 +3220,7 @@
         } catch (err) {
             addBubble('note', 'Director edit error: ' + (err?.message || err));
         } finally {
+            tickX.stop();
             busyNote.remove();
             running = false;
             setBusy(false);
@@ -3230,6 +3238,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'checking episode progress\u2026');
+        const tickX = busyTicker(busyNote, 'checking episode progress');
         const chatAt = chatRef();
         let concluded = false;
         try {
@@ -3238,7 +3247,7 @@
             const sp = await callLLMSmart([
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
-            ]);
+            ], tickX.onPartial);
             if (stopRequested) { addBubble('note', 'Stopped.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 progress check for the previous chat discarded.'); return; }
             const line = (sp.rest.trim().split('\n')[0] || (sp.think ? 'UNKNOWN \u2014 answer consumed by thinking; raise Max output tokens' : '')).slice(0, 200);
@@ -3256,6 +3265,7 @@
         } catch (err) {
             addBubble('note', 'Director status error: ' + (err?.message || err));
         } finally {
+            tickX.stop();
             busyNote.remove();
             running = false;
             setBusy(false);
@@ -3268,6 +3278,7 @@
         running = true;
         setBusy(true);
         const busyNote = addBubble('busy', 'sketching episode seeds\u2026');
+        const tickX = busyTicker(busyNote, 'brainstorming seeds');
         const chatAt = chatRef();
         try {
             const prev = metaRoot().director;
@@ -3285,7 +3296,7 @@
             const sp = await callLLMSmart([
                 { role: 'system', content: sys },
                 { role: 'user', content: user },
-            ]);
+            ], tickX.onPartial);
             if (stopRequested) { addBubble('note', 'Stopped.'); return; }
             if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 seeds for the previous chat discarded.'); return; }
             const text = sp.rest.trim();
@@ -3296,6 +3307,7 @@
         } catch (err) {
             addBubble('note', 'Seed suggestion error: ' + (err?.message || err));
         } finally {
+            tickX.stop();
             busyNote.remove();
             running = false;
             setBusy(false);
@@ -3891,6 +3903,36 @@
         mk('\uD83C\uDF3F', 'Branch: new session starting from this message', () => branchAt(hidx));
         mk('\u2715', 'Delete this message', () => deleteMessageAt(hidx));
         div.appendChild(row);
+    }
+
+    // Liveness readout for busy bubbles. A static 'directing…' cannot
+    // distinguish a healthy three-minute generation from a wedge, so the
+    // ticker proves life three ways: elapsed always moves; with streaming on,
+    // answer/thinking character counts climb on every chunk; and the watchdog
+    // countdown says exactly when the extension will give up on a silent
+    // provider. Directive secrecy holds — counts only, never content.
+    function busyTicker(node, label) {
+        const t0 = Date.now();
+        let last = t0;
+        let ans = 0, think = 0, phase = label;
+        const render = () => {
+            if (!node) return;
+            const secs = Math.max(0, Number(settings.llmTimeoutSec ?? 300));
+            const gone = Math.floor((Date.now() - t0) / 1000);
+            let s = phase + ' \u00b7 ' + gone + 's';
+            if (ans || think) s += ' \u00b7 ' + ans + ' chars' + (think ? ' (+' + think + ' thinking)' : '');
+            else if (!settings.streaming) s += ' \u00b7 waiting for the full response (enable Streaming in settings for live progress)';
+            else s += ' \u00b7 waiting for the first token\u2026';
+            if (secs) s += ' \u00b7 auto-abort in ' + Math.max(0, secs - Math.floor((Date.now() - last) / 1000)) + 's';
+            node.textContent = s;
+        };
+        const iv = setInterval(render, 1000);
+        render();
+        return {
+            onPartial: (acc, reasoning) => { ans = String(acc || '').length; think = String(reasoning || '').length; last = Date.now(); render(); },
+            phase: (p) => { phase = p; last = Date.now(); render(); },
+            stop: () => clearInterval(iv),
+        };
     }
 
     function addBubble(kind, text, hidx) {

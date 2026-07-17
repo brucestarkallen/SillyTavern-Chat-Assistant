@@ -232,6 +232,9 @@ ok(SRC.includes('The player RESTARTED this episode'), 'restart carries its own p
 ok(SRC.includes('function raceTransport('), 'every transport await runs under the stall watchdog');
 ok((SRC.match(/raceTransport\(/g) || []).length >= 5, 'watchdog covers stream start, stream chunks, plain request, and the fallback backend (found ' + (SRC.match(/raceTransport\(/g) || []).length + ' uses, need >= 5)');
 ok(SRC.includes('llmTimeoutSec: 300'), 'stall timeout defaults to 300s and is configurable (0 = off)');
+ok(SRC.includes('function busyTicker('), 'busy bubbles carry a liveness ticker');
+ok((SRC.match(/busyTicker\(busyNote/g) || []).length === 5, 'all five LLM flows (directive, critique, status, seeds, edit) tick (found ' + (SRC.match(/busyTicker\(busyNote/g) || []).length + ', need 5)');
+ok((SRC.match(/\], tick(C|X)?\.onPartial\);/g) || []).length >= 6, 'every ticked flow forwards live stream progress into the readout');
 ok(!/if \(running\) return;\s*\n\s*running = true/.test(SRC), 'no user-initiated entry can die silently at the running flag any more');
 ok(SRC.includes('critiqueOnEpisode: true'), 'episode-end auto-critique defaults ON');
 const fnAt = SRC.indexOf('async function onEpisodeConcluded(chatAt)');
@@ -363,6 +366,53 @@ document.getElementById('cc_dirnew').click();
 await new Promise(r => setTimeout(r, 300));
 console.log = realLog;
 ok(String((ctx.chatMetadata['continuityCopilot'].director || {}).text || '').includes('HEALED CUT'), 'after the watchdog fired, the NEXT click succeeded — running was released, no reload needed');
+
+console.log('== v2.57.0 behavior: the busy bubble proves the extension is alive ==');
+// Streaming transport that yields chunks with real gaps; the bubble must show
+// climbing character counts, the phase change to the showrunner pass, and the
+// auto-abort countdown — counts only, never directive content.
+llmCalls.length = 0;
+CA.llmTimeoutSec = 60;
+CA.streaming = true;
+const bubbleSnapshots = [];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages, maxTok, opts) => {
+        const sys = (messages && messages[0] && messages[0].content) || '';
+        const isReview = sys.includes('SHOWRUNNER running the second-draft pass');
+        return function stream() {
+            return (async function* () {
+                const words = isReview ? ['Intensity: standard\n', 'TICKED CUT: ', 'alive and streaming.'] : ['Intensity: standard\n', '1. EPISODE ', 'PREMISE — liveness.'];
+                for (const w of words) { await sleep(40); yield { text: w }; }
+            })();
+        };
+    },
+};
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'E2 to restart with ticks.', episode: 2, concluded: false, ts: 11 }, directorEp: 2 };
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+const logEl = document.getElementById('cc_log');
+const snap = () => {
+    const kids = (logEl && logEl.children) || [];
+    for (const k of kids) if (k && k.className && String(k.className).includes('cc_busy') && k.textContent) bubbleSnapshots.push(k.textContent);
+};
+const snapIv = setInterval(snap, 25);
+console.log = logCap;
+document.getElementById('cc_dirnew').click();
+await sleep(700);
+console.log = realLog;
+clearInterval(snapIv);
+snap();
+const sawWaiting = bubbleSnapshots.some(t => /waiting for the first token/.test(t));
+const sawChars = bubbleSnapshots.some(t => /\b\d+ chars/.test(t));
+const sawPhase2 = bubbleSnapshots.some(t => /showrunner second draft/.test(t));
+const sawCountdown = bubbleSnapshots.some(t => /auto-abort in \d+s/.test(t));
+const leakedContent = bubbleSnapshots.some(t => /PREMISE|TICKED CUT/.test(t));
+ok(sawWaiting || sawChars, 'the ticker rendered (waiting state or live counts) — got ' + bubbleSnapshots.length + ' snapshots');
+ok(sawChars, 'character counts climbed on stream chunks — liveness is visible');
+ok(sawPhase2, 'the phase label flipped to the showrunner second draft mid-flow');
+ok(sawCountdown, 'the watchdog countdown is visible, so a silent provider has a visible fuse');
+ok(!leakedContent, 'secrecy held: the readout showed counts, never directive content');
+ok(String((ctx.chatMetadata['continuityCopilot'].director || {}).text || '').includes('TICKED CUT'), 'the streamed restart completed and stored the showrunner cut');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
