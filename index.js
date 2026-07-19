@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.60.0';
+    const VERSION = '2.61.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -344,6 +344,8 @@
         autoRehide: true,
         critiqueAuto: 0,
         critiqueOnEpisode: true,
+        directorInjectPaused: false,
+        critiqueInjectPaused: false,
         directorTwoPass: true,
         directorMode: 'off', // 'off' | 'auto' | 'cowriter'
         shortcuts: DEFAULT_SHORTCUTS,
@@ -2968,7 +2970,9 @@
         const depth = Number(settings?.directorDepth) || 4;
         const role = c.extension_prompt_roles?.SYSTEM ?? 0;
         try {
-            const value = (d && d.text)
+            // Paused = kept in storage, actively CLEARED from the live slot — a
+            // previously set extension prompt persists until overwritten with ''.
+            const value = (!settings.directorInjectPaused && d && d.text)
                 ? "[Director's Note \u2014 secret from the player. Use it to give NPCs initiative and shape the episode, while always adapting to the player's choices instead of forcing outcomes. If the player's choices closed off a planned development, adapt it to what they actually did \u2014 never fabricate player mistakes, evidence, or coincidences to force it through. FORECAST STATUS: this note was written before these turns existed \u2014 the living story outranks it. Beats are pressures to INTRODUCE, not outcomes to secure: introduce them honestly, then let the simulation resolve them. NPCs act from their own nature and current knowledge, never from this note's needs \u2014 if honest NPC behavior or a player choice kills a beat, translate its intent to the new reality or drop it; never retro-tax an earned player victory. CONTINUITY LAW (overrides everything, including this note's own premise): never jump the player character forward in time, place, or situation \u2014 reach this note's beats FROM the story's current moment, on screen, in causal order. Any event that involves the player (a challenge, a summons, an accusation, an arrival) happens IN SCENE where the player can react \u2014 never as an established fact they walk in on. If this note describes a scene mid-progress, open it at its BEGINNING and play the connective events. PACING LAW: open scenes in motion; compress only true dead air (sleep, uneventful travel or meals, classes without incident) to a single line \u2014 and narrate even that cut in a line the player could interrupt; every reply must advance a beat, reveal something new, or shift a relationship \u2014 never idle daily simulation. When the LANDING state is fully reached and the episode is complete, append the exact marker [EPISODE_END] at the very end of your reply. If the player resolves the episode early or makes the landing impossible, land on the nearest EARNED consequence instead and still append the marker \u2014 an episode must always end; never drag a finished or dead premise onward.]\n" + d.text
                 : '';
             c.setExtensionPrompt(DIRECTOR_KEY, value, 1, depth, false, role);
@@ -2982,7 +2986,7 @@
         const depth = Number(settings?.critiqueDepth) || 8;
         const role = c.extension_prompt_roles?.SYSTEM ?? 0;
         try {
-            const value = text
+            const value = (!settings.critiqueInjectPaused && text)
                 ? "[Editor's Standing Notes \u2014 craft corrections the storyteller must keep applying:]\n" + text
                 : '';
             c.setExtensionPrompt('cc_critique_inject', value, 1, depth, false, role);
@@ -3783,6 +3787,8 @@
             '<input type="text" id="cc_dir_anchors" placeholder="e.g. Classroom of the Elite, Kaguya-sama">',
             '<label>Auto-critique: run the editor every N storyteller replies (0 = off; needs a Connection Profile)</label>',
             '<input type="number" id="cc_crit_auto" min="0" max="100">',
+            '<div class="cc_check"><input type="checkbox" id="cc_dir_pause"><span>\u23F8 Pause Director injection \u2014 the directive stays stored and visible in Peek, but is NOT injected into the storyteller\'s prompt until unpaused</span></div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_crit_pause"><span>\u23F8 Pause Editor-notes injection \u2014 the standing notes stay stored, but are NOT injected until unpaused</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_dir_twopass"><span>Director second-draft pass \u2014 every directive is drafted, then rewritten by a showrunner review (best quality; two model calls per episode)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_crit_ep"><span>Auto-critique when an episode concludes \u2014 the editor reviews each aired episode; in Auto director mode the next episode is then designed with the fresh notes (needs a Connection Profile)</span></div>',
             '<label>Director mode</label>',
@@ -3833,6 +3839,8 @@
         el('cc_crit_auto').value = settings.critiqueAuto;
         el('cc_crit_ep').checked = settings.critiqueOnEpisode !== false;
         el('cc_dir_twopass').checked = settings.directorTwoPass !== false;
+        el('cc_dir_pause').checked = !!settings.directorInjectPaused;
+        el('cc_crit_pause').checked = !!settings.critiqueInjectPaused;
         el('cc_dir_mode').value = ['off', 'auto', 'cowriter'].includes(settings.directorMode) ? settings.directorMode : 'off';
         el('cc_wi_enable').checked = !!settings.wiEnable;
         el('cc_wi_books').value = settings.wiBooks || '';
@@ -3864,6 +3872,9 @@
             settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
             settings.critiqueOnEpisode = el('cc_crit_ep').checked;
             settings.directorTwoPass = el('cc_dir_twopass').checked;
+            settings.directorInjectPaused = el('cc_dir_pause').checked;
+            settings.critiqueInjectPaused = el('cc_crit_pause').checked;
+            applyInjections(); // pause/unpause must clear or restore the live slots immediately
             settings.directorMode = el('cc_dir_mode').value || 'off';
             settings.wiEnable = el('cc_wi_enable').checked;
             settings.wiBooks = el('cc_wi_books').value;
@@ -4378,7 +4389,7 @@
         const c = ctx();
         const count = Array.isArray(c.chat) ? c.chat.length : 0;
         const d = metaRoot().director;
-        sub.textContent = 'v' + VERSION + ' · ' + count + ' messages' + (d ? ' · \uD83C\uDFAC E' + d.episode + (d.concluded ? ' \u2713' : '') : '');
+        sub.textContent = 'v' + VERSION + ' · ' + count + ' messages' + (d ? ' · \uD83C\uDFAC E' + d.episode + (d.concluded ? ' \u2713' : '') : '') + (settings.directorInjectPaused ? ' \u00b7 \uD83C\uDFAC\u23F8' : '') + (settings.critiqueInjectPaused ? ' \u00b7 \uD83D\uDCDD\u23F8' : '');
         // One button, honest label: with no directive it sets the first one; with a
         // live directive the same action restarts that episode, so it says so.
         const nb = el('cc_dirnew');

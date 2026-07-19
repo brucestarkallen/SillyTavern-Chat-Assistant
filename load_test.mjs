@@ -139,7 +139,11 @@ const ctx = {
     },
     event_types,
     saveSettingsDebounced: () => {}, saveMetadata: () => {}, saveMetadataDebounced: () => {},
-    setExtensionPrompt: () => {}, getCurrentChatId: () => 'gate.jsonl',
+    // Injections are the extension's primary output channel — capture them so
+    // pause/unpause behavior is provable instead of vanishing into a no-op.
+    extPrompts: new Map(),
+    setExtensionPrompt(key, value) { ctx.extPrompts.set(String(key), String(value ?? '')); },
+    getCurrentChatId: () => 'gate.jsonl',
     registerSlashCommand: () => {},
     SlashCommandParser: { addCommandObject: () => {} },
     SlashCommand: { fromProps: () => ({}) },
@@ -233,6 +237,8 @@ ok((SRC.match(/Deliberate efficiently \\u2014 the token budget is shared/g) || [
 ok(SRC.includes('raw = await callLLM(msgs2, onPartial, bigPot);'), 'think-consumed recovery runs in an ENLARGED pot — same-size recovery over longer input is mathematically doomed');
 ok(SRC.includes('keep it to a single sentence'), 'recovery gives forced reasoning phases an explicit escape hatch');
 ok(SRC.includes('FIRST-DRAFT MODE \\u2014 a showrunner second-draft pass will interrogate'), 'with two-pass on, the draft declares fast-draft mode — deep thought moves to the review');
+ok(SRC.includes('directorInjectPaused: false') && SRC.includes('critiqueInjectPaused: false'), 'both pause toggles exist and default OFF');
+ok(SRC.includes('!settings.directorInjectPaused && d && d.text') && SRC.includes('!settings.critiqueInjectPaused && text'), 'both injectors gate on their pause flag and actively clear when paused');
 ok(SRC.includes('CAST \\u2014 before writing beats, sweep the established cast'), 'director default carries the CAST law (stake sweep, jurisdiction-by-definition, no furniture placement)');
 ok(SRC.includes('FURNITURE CHARACTERS'), 'critique bar catches furniture characters and absent stakeholders');
 ok(SRC.includes('SHOWRUNNER running the second-draft pass'), 'directives get a showrunner second-draft pass (premise ambition, the memorable moment, wasted cast, safety, logic)');
@@ -492,6 +498,28 @@ ok(potCalls[0] && !potCalls[0].fastDraft, 'single-pass mode keeps full deliberat
 ok(potCalls[1] && potCalls[1].maxTok === 8192, 'the recovery ran in the enlarged pot (got ' + (potCalls[1] && potCalls[1].maxTok) + ', want 8192)');
 ok(potCalls[1] && potCalls[1].recovery, 'the recovery demanded transcription of the finished reasoning');
 ok(String((ctx.chatMetadata['continuityCopilot'].director || {}).text || '').includes('transcribed from the finished reasoning'), 'the directive was recovered and stored — the thinking was not wasted');
+
+console.log('== v2.61.0 behavior: pause clears the live injection, storage stays ==');
+// State from the previous sim: a live directive. Seed editor notes too, then
+// pause both, re-apply via the real refresh path, and prove: slots cleared,
+// storage intact, Peek-able; unpause restores both slots verbatim.
+ctx.chatMetadata.cc_critique = 'NORTH STAR: keep the irony taut.\n1. Track every named presence.';
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+const dirSlot = () => String(ctx.extPrompts.get('cc_director') || '');
+const critSlot = () => String(ctx.extPrompts.get('cc_critique_inject') || '');
+ok(dirSlot().includes('transcribed from the finished reasoning'), 'unpaused: the directive is live in its injection slot');
+ok(critSlot().includes('NORTH STAR: keep the irony taut.'), 'unpaused: the editor notes are live in their injection slot');
+CA.directorInjectPaused = true;
+CA.critiqueInjectPaused = true;
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+ok(dirSlot() === '', 'paused: the director slot is actively cleared, not merely skipped');
+ok(critSlot() === '', 'paused: the editor-notes slot is actively cleared');
+ok(String((ctx.chatMetadata['continuityCopilot'].director || {}).text || '').includes('transcribed from the finished reasoning'), 'paused: the directive itself is still stored untouched');
+ok(String(ctx.chatMetadata.cc_critique || '').includes('NORTH STAR'), 'paused: the editor notes are still stored untouched');
+CA.directorInjectPaused = false;
+CA.critiqueInjectPaused = false;
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+ok(dirSlot().includes('transcribed from the finished reasoning') && critSlot().includes('NORTH STAR'), 'unpause restores both live slots verbatim from storage');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
