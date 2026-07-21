@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.61.0';
+    const VERSION = '2.62.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3070,7 +3070,7 @@
             undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur }] });
             saveMeta();
             applyCritiqueInjection();
-            const note = (isAuto ? '\uD83D\uDCDD Auto-critique: ' : '\uD83D\uDCDD Critique updated: ') + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)';
+            const note = (isAuto ? '\uD83D\uDCDD Auto-critique: ' : '\uD83D\uDCDD Critique updated: ') + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)' + (settings.critiqueInjectPaused ? ' \u26A0 Notes injection is PAUSED \u2014 stored but not applied until unpaused.' : '');
             addBubble('note', note);
             pushHistory('note', note);
         } catch (err) {
@@ -3180,7 +3180,7 @@
                 ? '\uD83C\uDFAC Episode ' + ep + ' built around your seed. Beats hidden \u2014 just keep playing (\uD83C\uDFAC Peek to spoil yourself).'
                 : isRestart
                     ? '\uD83C\uDFAC Episode ' + ep + ' restarted \u2014 the old directive is discarded and a deliberately different episode is set. Content hidden \u2014 just keep playing.'
-                    : (isAuto ? '\uD83C\uDFAC Auto \u2014 directive set (episode ' : '\uD83C\uDFAC Directive set (episode ') + ep + '). Content hidden \u2014 just keep playing.';
+                    : (isAuto ? '\uD83C\uDFAC Auto \u2014 directive set (episode ' : '\uD83C\uDFAC Directive set (episode ') + ep + '). Content hidden \u2014 just keep playing.' + (settings.directorInjectPaused ? ' \u26A0 Director injection is PAUSED \u2014 unpause it in settings before the storyteller can see this.' : '');
             addBubble('note', note);
             pushHistory('note', note);
             updateSub();
@@ -3234,7 +3234,7 @@
         // Automation over instructions: run the residue audit through the normal
         // pipeline (fetch, staging, dedup, Apply/Skip cards) — the user reviews
         // deletions on cards instead of having to know a magic phrase.
-        if (clearedText) {
+        if (clearedText.trim()) {
             if (running) {
                 addBubble('note', 'Copilot is busy \u2014 when it finishes, say "audit memory for leftovers from the cleared season" and I\'ll scan then.');
             } else {
@@ -4504,6 +4504,7 @@
             if (mode === 'off') return;
             if (running) return;
             if (!settings.profileId) return;
+            if (settings.directorInjectPaused) return; // paused channel: never burn directive calls the storyteller cannot see
             const d = metaRoot().director;
             if (mode === 'auto') {
                 if (!d) { generateDirective('new', true); return; }
@@ -4528,7 +4529,7 @@
     // inside a sameChat guard already; the entry guard is belt for the async gap.
     async function onEpisodeConcluded(chatAt) {
         if (!sameChat(chatAt)) return;
-        if (settings.critiqueOnEpisode && settings.profileId && !running) {
+        if (settings.critiqueOnEpisode && settings.profileId && !running && !settings.critiqueInjectPaused) {
             const m = metaRoot();
             m.critAutoCount = 0; // the episode review covers the counter's pending pass
             saveMeta();
@@ -4542,6 +4543,7 @@
         try {
             const n = Number(settings.critiqueAuto) || 0;
             if (n <= 0) return;
+            if (settings.critiqueInjectPaused) return; // paused channel: don't count toward a trigger the storyteller cannot receive
             const m = metaRoot();
             m.critAutoCount = (Number(m.critAutoCount) || 0) + 1;
             saveMeta();
