@@ -231,7 +231,7 @@ ok(SRC.includes('CRAFT \\u2014 the difference between competent and masterpiece'
 ok(SRC.includes('STACK MEANING before the centerpiece'), 'seed mode expands premises showrunner-style (meaning stack / phases / population / reprice)');
 ok(SRC.includes('NORTH STAR:'), 'critique output contract opens with the single highest-leverage NORTH STAR lever');
 ok(SRC.includes('FRICTIONLESS SUCCESS'), 'critique holds the story to the masterpiece bar, not only the defect floor');
-ok(SRC.includes('LEGACY_DIRECTOR_PROMPT_V248, LEGACY_DIRECTOR_PROMPT_V251, LEGACY_DIRECTOR_PROMPT_V252, LEGACY_DIRECTOR_PROMPT_V257];'), 'stored 2.49-2.58 defaults auto-upgrade to the current default');
+ok(SRC.includes('LEGACY_DIRECTOR_PROMPT_V252, LEGACY_DIRECTOR_PROMPT_V257, LEGACY_DIRECTOR_PROMPT_V262];'), 'stored 2.49-2.62 defaults auto-upgrade to the current default');
 ok(SRC.includes('DELIBERATION \\u2014 if you reason privately'), 'director default carries deliberation discipline for reasoning models');
 ok((SRC.match(/Deliberate efficiently \\u2014 the token budget is shared/g) || []).length === 2, 'showrunner and critique prompts carry deliberation discipline');
 ok(SRC.includes('raw = await callLLM(msgs2, onPartial, bigPot);'), 'think-consumed recovery runs in an ENLARGED pot — same-size recovery over longer input is mathematically doomed');
@@ -550,6 +550,52 @@ for (const f of handlers.get('MESSAGE_RECEIVED') || []) await f(ctx.chat.length 
 await sleep(250);
 console.log = realLog;
 ok(bgCalls > 0, 'unpaused: automation resumed on the very next reply (got ' + bgCalls + ' calls)');
+
+
+console.log('== v2.63.0 behavior: player sovereignty — the plan cannot pre-decide the player ==');
+// The complaint this closes: directives were written as destiny ("MC does not
+// help") instead of premise ("bullying erupts in front of the MC — the answer
+// is theirs"). The fix is structural: the FORMAT can no longer express a
+// predetermined outcome. These assertions hold that shape in place.
+CA.directorMode = 'off';
+// (a) The shipping default (migrated into live settings at init) carries the new spine.
+ok(String(CA.directorPrompt || '').includes('THE PLAN STOPS AT THE PLAYER'), 'default prompt carries the stop-at-the-player beat grammar law');
+ok(String(CA.directorPrompt || '').includes('EPISODE QUESTION'), 'default prompt anchors the episode on a player-facing EPISODE QUESTION');
+ok(String(CA.directorPrompt || '').includes('is a stolen choice'), 'the grammar law teaches by example: the world half is a beat, the player half is a stolen choice');
+ok(!String(CA.directorPrompt || '').includes('natural end state of the episode'), 'the fixed-outcome landing definition is gone from the shipping default');
+ok(String(CA.directorPrompt || '').includes('one line per likely answer naming how the world responds'), 'landing maps consequences per answer instead of scripting one outcome');
+ok(String(CA.directorPrompt || '').includes('(7) THEME'), 'craft doctrine gained the THEME law (value under test, felt not announced)');
+// (b) The showrunner pass hunts sovereignty violations and cannot sharpen into illogic.
+ok(SRC.includes('6. SOVEREIGNTY \\u2014 hunt every sentence that decides FOR the player'), 'showrunner pass carries the SOVEREIGNTY interrogation');
+ok(SRC.includes('settle your six interrogations'), 'showrunner deliberation counts all six interrogations');
+ok(SRC.includes('scripts the player\\\'s half of a collision is a downgrade'), 'sharpening has an explicit truth/freedom counterweight');
+ok(SRC.includes('plausible causation \\u2014 would a skeptical viewer accept why each beat happens now'), 'LOGIC interrogation now checks causal plausibility, not just rule compliance');
+// (c) The live storyteller wrapper: episode ends on the ANSWERED question, never on reaching a scripted landing.
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'E9 sovereignty plan.', episode: 9, concluded: false, ts: 1, msgAt: ctx.chat.length }, directorEp: 9 };
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+const wrap = dirSlot();
+ok(wrap.includes('STOP AT THE PLAYER'), 'wrapper orders the storyteller to stop at the player\u2019s decision point');
+ok(wrap.includes('unchosen branches never happened'), 'wrapper quarantines unchosen consequence branches from canon');
+ok(wrap.includes('When the EPISODE QUESTION has been answered by the player on screen'), 'wrapper ends the episode on the answered question');
+ok(!wrap.includes('When the LANDING state is fully reached'), 'the old reach-the-landing teleology is gone from the wrapper');
+// (d) Migration mechanics, executed with the real values: the v2.62 default was
+// frozen verbatim, differs from the new default, upgrades when stored, and a
+// customized copy is left alone.
+const hookM = SRC.match(/const HOOK_LINE = ('(?:[^'\\]|\\.)*');/);
+const v262M = SRC.match(/const LEGACY_DIRECTOR_PROMPT_V262 = (\[[\s\S]*?\n    \]\.join\('\\n'\));/);
+const defM = SRC.match(/const DEFAULT_DIRECTOR_PROMPT = (\[[\s\S]*?\n    \]\.join\('\\n'\));/);
+ok(!!(hookM && v262M && defM), 'HOOK_LINE, frozen V262, and new default are all extractable from source');
+let v262 = '', dflt = '';
+try {
+    const HOOK = new Function('return ' + hookM[1])();
+    v262 = new Function('HOOK_LINE', 'return ' + v262M[1])(HOOK);
+    dflt = new Function('HOOK_LINE', 'return ' + defM[1])(HOOK);
+} catch (e) { ok(false, 'evaluating the prompt constants threw: ' + (e && e.message)); }
+ok(v262.includes('natural end state of the episode') && v262.includes('conclude naturally at the landing'), 'the freeze preserved the old v2.62 text verbatim (stored copies will match it)');
+ok(v262.trim() !== dflt.trim(), 'the new default genuinely differs from the frozen v2.62 default');
+const migrates = (stored) => [v262].some(pp => stored.trim() === pp.trim());
+ok(migrates(v262 + '\n'), 'migration predicate: an untouched stored v2.62 default upgrades');
+ok(!migrates(v262 + '\nMY CUSTOM LAW'), 'migration predicate: a user-customized prompt is never overwritten');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
