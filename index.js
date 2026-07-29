@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.67.0';
+    const VERSION = '2.68.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1203,14 +1203,14 @@
                 await c.executeSlashCommands('/world silent=true ' + clean);
             }
         } catch (e) { console.warn(LOG, 'book activation note', e); }
-        return { ok: true, created: clean };
+        return { ok: true, created: clean, data };
     }
 
     async function applyWiOne(edit) {
         if (edit.createBook) {
             const res = await wiCreateBook(edit.book, edit.hasContent || edit.comment ? { keys: edit.setKeys, comment: edit.comment, content: edit.replace, constant: edit.status_type === 'constant' } : null);
             if (!res.ok) return { ok: false, reason: res.reason };
-            return { ok: true, book: edit.book, before: { __newbook: edit.book }, path: 'NEW BOOK "' + edit.book + '"' + (edit.hasContent || edit.comment ? ' + first entry' : '') };
+            return { ok: true, book: edit.book, before: { __newbook: edit.book }, after: res.data, path: 'NEW BOOK "' + edit.book + '"' + (edit.hasContent || edit.comment ? ' + first entry' : '') };
         }
         const data = await wiLoad(edit.book);
         if (!data) return { ok: false, reason: 'book "' + edit.book + '" not found' };
@@ -1225,7 +1225,7 @@
             const title = String(data.entries[foundKey].comment || '').trim() || '(untitled)';
             delete data.entries[foundKey];
             const ok = await wiSave(edit.book, data);
-            return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + edit.uid + ' DELETED "' + title + '"' } : { ok: false, reason: 'save failed' };
+            return ok ? { ok: true, book: edit.book, before, after: data, path: edit.book + '#' + edit.uid + ' DELETED "' + title + '"' } : { ok: false, reason: 'save failed' };
         }
         if (edit.newEntry) {
             let maxUid = -1;
@@ -1242,7 +1242,7 @@
             applyWiFields(entry, edit);
             data.entries[String(uid)] = entry;
             const ok = await wiSave(edit.book, data);
-            return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + uid + ' (new)' } : { ok: false, reason: 'save failed' };
+            return ok ? { ok: true, book: edit.book, before, after: data, path: edit.book + '#' + uid + ' (new)' } : { ok: false, reason: 'save failed' };
         }
         const entry = wiEntryList(data).find(e => Number(e.uid) === edit.uid);
         if (!entry) return { ok: false, reason: 'entry uid ' + edit.uid + ' not found in ' + edit.book };
@@ -1258,7 +1258,7 @@
         }
         applyWiFields(entry, edit);
         const ok = await wiSave(edit.book, data);
-        return ok ? { ok: true, book: edit.book, before, path: edit.book + '#' + edit.uid } : { ok: false, reason: 'save failed' };
+        return ok ? { ok: true, book: edit.book, before, after: data, path: edit.book + '#' + edit.uid } : { ok: false, reason: 'save failed' };
     }
 
     function gatherMemory() {
@@ -1791,6 +1791,13 @@
         return h + ':' + s2.length;
     }
 
+    // Stable fingerprint of a metadata value (string or structure). Used by the
+    // undo drift guards to prove a memory key / worldbook is still exactly what
+    // OUR apply left behind before restoring its pre-apply snapshot.
+    function memValueHash(v) {
+        try { return hashText(JSON.stringify(v) || ''); } catch (e) { return undefined; }
+    }
+
     function memStrings(cb) {
         const c = ctx();
         const md = c.chatMetadata || c.chat_metadata || {};
@@ -2074,7 +2081,7 @@
         while (msg.extra.cc_backups.length > 3) msg.extra.cc_backups.shift();
 
         refreshMessage(i);
-        return { ok: true, before, beforeSys, fuzzyNote };
+        return { ok: true, before, beforeSys, fuzzyNote, after: next };
     }
 
     // Bulk find/replace across a RANGE of messages (literal, exact matches only — the
@@ -2110,7 +2117,7 @@
             if (!Array.isArray(msg.extra.cc_backups)) msg.extra.cc_backups = [];
             msg.extra.cc_backups.push({ ts: Date.now(), mes: before });
             while (msg.extra.cc_backups.length > 3) msg.extra.cc_backups.shift();
-            affected.push({ id: i, before, beforeSys: !!msg.is_system });
+            affected.push({ id: i, before, beforeSys: !!msg.is_system, after: next });
             refreshMessage(i);
         }
         return { ok: true, affected };
@@ -2423,6 +2430,7 @@
         // "failing" with a misleading anchor-not-found error.
         const appliedSigs = new Set();
         const appliedRefs = [];
+        const wiAfter = new Map();   // book -> last saved data (undo drift fingerprint)
         for (const edit of list) {
             const st = edit.kind === 'wi' ? edit.editStatus : edit.status;
             if (st !== 'pending') continue;
@@ -2453,6 +2461,7 @@
                     edit.editStatus = 'applied \u2192 WB ' + res.path;
                     wiApplied.push(res.path);
                     if (!wiBackups.has(res.book)) wiBackups.set(res.book, res.before);
+                    if (res.after !== undefined) wiAfter.set(res.book, res.after);
                     appliedSigs.add(sig);
                     appliedRefs.push(edit);
                 } else {
@@ -2462,7 +2471,7 @@
                 const res = await applyBulkReplace(edit);
                 if (res.ok && res.affected.length) {
                     edit.status = 'applied \u2014 ' + res.affected.length + ' message(s)';
-                    for (const a of res.affected) chatApplied.push({ kind: 'chat', id: a.id, before: a.before, beforeSys: a.beforeSys });
+                    for (const a of res.affected) chatApplied.push({ kind: 'chat', id: a.id, before: a.before, beforeSys: a.beforeSys, afterHash: hashText(a.after !== undefined ? a.after : a.before) });
                     appliedSigs.add(sig);
                     rebaseReviewHashes(list, edit, res.affected.map(a => Number(a.id)));
                     appliedRefs.push(edit);
@@ -2475,7 +2484,7 @@
                 const res = await applyOne(edit);
                 if (res.ok) {
                     edit.status = 'applied' + (res.fuzzyNote || '');
-                    chatApplied.push({ kind: 'chat', id: edit.id, before: res.before, beforeSys: res.beforeSys });
+                    chatApplied.push({ kind: 'chat', id: edit.id, before: res.before, beforeSys: res.beforeSys, afterHash: hashText(res.after !== undefined ? res.after : res.before) });
                     appliedSigs.add(sig);
                     rebaseReviewHashes(list, edit, [Number(edit.id)]);
                     appliedRefs.push(edit);
@@ -2485,8 +2494,17 @@
             }
         }
         const items = [...chatApplied];
-        for (const [key, before] of keyBackups.entries()) items.push({ kind: 'mem', key, before });
-        for (const [book, before] of wiBackups.entries()) items.push({ kind: 'wi', book, before });
+        // Undo drift fingerprints: the state OUR run left each target in. Undo
+        // verifies these before restoring, so a swipe, a user edit, a message
+        // deletion (reindex), a co-extension memory write, or a World-Info-editor
+        // change between apply and undo is refused loudly instead of overwritten.
+        let mdNow = null;
+        try { mdNow = ctx().chatMetadata || ctx().chat_metadata || null; } catch (e) { /* ignore */ }
+        for (const [key, before] of keyBackups.entries()) items.push({ kind: 'mem', key, before, afterHash: mdNow ? memValueHash(mdNow[key]) : undefined });
+        for (const [book, before] of wiBackups.entries()) {
+            const after = wiAfter.get(book);
+            items.push({ kind: 'wi', book, before, afterHash: after !== undefined ? hashText(JSON.stringify(after && after.entries ? after.entries : after)) : undefined });
+        }
         if (items.length) {
             const labelParts = [];
             if (chatApplied.length) labelParts.push(chatApplied.map(a => '#' + a.id).join(', '));
@@ -2524,6 +2542,7 @@
         const chatAt = chatRef();
         const rootAt = metaRoot();
         const changed = [];
+        const refused = [];
         let memRestored = false;
         // Restore in REVERSE apply order: if one batch touched the same message twice
         // (e.g. a bulk replace over a range plus a targeted edit on a message in it),
@@ -2532,10 +2551,29 @@
             const item = batch.items[_i];
             if (item.kind === 'mem') {
                 const md = c.chatMetadata || c.chat_metadata;
-                if (md) { md[item.key] = item.before; memRestored = true; }
+                if (!md) { refused.push('memory "' + item.key + '" (no chat metadata)'); continue; }
+                // Drift guard: restore only when the key is still EXACTLY what our
+                // apply left behind. A co-extension (Summaryception rewrites its
+                // ledger every generation) or a later edit must never be clobbered
+                // by a stale whole-key snapshot.
+                if (item.afterHash !== undefined && memValueHash(md[item.key]) !== item.afterHash) {
+                    refused.push('memory "' + item.key + '" changed since the apply (another extension or a later edit) \u2014 not restored');
+                    continue;
+                }
+                md[item.key] = item.before; memRestored = true;
                 continue;
             }
             if (item.kind === 'wi') {
+                // Drift guard: entries added/edited in ST's World Info editor (or by
+                // a later apply) since OUR save must survive the undo.
+                if (item.afterHash !== undefined) {
+                    let curBook = null;
+                    try { curBook = await wiLoad(item.book); } catch (e) { /* ignore */ }
+                    if (curBook && hashText(JSON.stringify(curBook.entries || curBook)) !== item.afterHash) {
+                        refused.push('worldbook "' + item.book + '" changed since the apply (World Info editor or a later edit) \u2014 not restored');
+                        continue;
+                    }
+                }
                 if (item.before && item.before.__newbook) {
                     // Undo of a created book: empty it (best effort \u2014 ST keeps no getContext book-delete).
                     await wiSave(item.book, { entries: {} });
@@ -2545,7 +2583,15 @@
                 continue;
             }
             const msg = c.chat?.[item.id];
-            if (!msg) continue;
+            if (!msg) { refused.push('message #' + item.id + ' no longer exists (messages deleted since the apply) \u2014 not restored'); continue; }
+            // Drift + reindex guard: the message sitting at this index must still be
+            // the text OUR apply produced. A swipe, a user edit, a regeneration, or a
+            // deletion that shifted indices all fail this check — and must never be
+            // silently overwritten with stale text.
+            if (item.afterHash !== undefined && hashText(String(msg.mes || '')) !== item.afterHash) {
+                refused.push('message #' + item.id + ' changed since the edit was applied (swipe / edit / reindex) \u2014 not restored');
+                continue;
+            }
             msg.mes = item.before;
             if (typeof item.beforeSys === 'boolean') {
                 await setHiddenState(item.id, item.beforeSys);
@@ -2583,6 +2629,14 @@
         const note = 'Undid edits on ' + batch.label + '.' + (returned ? ' ' + returned + ' card(s) returned to pending \u2014 adjust or re-apply.' : '');
         addBubble('note', note);
         pushHistory('note', note);
+        if (refused.length) {
+            // Loud, itemized, and NOTHING was overwritten for these. The safe
+            // recovery is a fresh proposal against the current text, not a blind revert.
+            const rn = 'Undo SKIPPED ' + refused.length + ' item(s) that drifted since the apply (nothing was overwritten):\n\u2022 ' + refused.join('\n\u2022 ');
+            addBubble('note', rn);
+            pushHistory('note', rn);
+            toast('Undo skipped ' + refused.length + ' drifted item(s) \u2014 details in the panel.', 'warning');
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3196,7 +3250,7 @@
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty critique');
             md.cc_critique = text;
-            undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur }] });
+            undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur, afterHash: memValueHash(text) }] });
             saveMeta();
             applyCritiqueInjection();
             const note = (isAuto ? '\uD83D\uDCDD Auto-critique: ' : '\uD83D\uDCDD Critique updated: ') + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)' + (settings.critiqueInjectPaused ? ' \u26A0 Notes injection is PAUSED \u2014 stored but not applied until unpaused.' : '');

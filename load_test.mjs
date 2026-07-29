@@ -765,6 +765,93 @@ console.log = realLog;
 ok(globalThis.__watcherSys.includes('This episode is a RESTART'), 'restart: the watcher is told the discarded directive never aired');
 ok(String(((ctx.chatMetadata['continuityCopilot'] || {}).director || {}).text || '').includes('WATCHER AIRED FOUR'), 'restart flow ships the watcher final cut');
 
+console.log('== v2.68.0 behavior: undo is drift-guarded (swipe / deletion / external memory / WI editor) ==');
+// Drive the REAL paths end-to-end: stage cards through Send, apply through
+// Apply-all, drift the target from OUTSIDE (swipe, delete, co-extension write,
+// World-Info editor), then Undo. The pre-2.68 blind restore must be refused
+// loudly and the drifted content must survive. A clean undo must still work.
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.directorMode = 'off';
+CA.critiqueAuto = 0;
+CA.critiqueOnEpisode = false;
+CA.directorInjectPaused = true;
+CA.critiqueInjectPaused = true;
+const ccLogText = () => (document.getElementById('cc_log').children || []).map(k => String(k.textContent || '') + String(k.innerHTML || ''));
+const clickFresh = (id) => {
+    const b = document.getElementById(id);
+    // Mock fidelity: the real DOM destroys and recreates these buttons on every
+    // render (fresh listeners); the mock stub element accumulates them. Keep the
+    // latest only, or one click fires every render generation at once.
+    const arr = b._on.get('click') || [];
+    if (arr.length > 1) b._on.set('click', arr.slice(-1));
+    b.click();
+};
+const driveAsk = async (reply) => {
+    ctx.ConnectionManagerRequestService = { sendRequest: async () => reply };
+    document.getElementById('cc_input').value = 'please fix this';
+    clickFresh('cc_send');
+    await sleep(350);
+    clickFresh('cc_applyall');
+    await sleep(350);
+};
+// Positive control: with NO drift, undo still restores exactly.
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'The road was iron.' });
+await driveAsk('<edits>[{"id":0,"find":"iron","replace":"steel"}]</edits>');
+ok(ctx.chat[0].mes === 'The road was steel.', 'sim setup: chat edit applied through the real Apply-all path');
+clickFresh('cc_undo');
+await sleep(300);
+ok(ctx.chat[0].mes === 'The road was iron.', 'clean undo (no drift) still restores the pre-apply text exactly');
+// (a) Swipe drift.
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: true, mes: 'hi' }, { is_user: false, mes: 'The sword was iron.' });
+await driveAsk('<edits>[{"id":1,"find":"iron","replace":"steel"}]</edits>');
+ok(ctx.chat[1].mes === 'The sword was steel.', 'sim setup: second chat edit applied');
+ctx.chat[1].mes = 'The player rewrote this swipe entirely.';
+clickFresh('cc_undo');
+await sleep(300);
+ok(ctx.chat[1].mes === 'The player rewrote this swipe entirely.', 'undo-after-swipe: the player\u2019s newer text survived \u2014 the blind restore was refused');
+ok(ccLogText().some(t => /SKIPPED/.test(t) && /swipe \/ edit \/ reindex/.test(t)), 'undo-after-swipe: the refusal was loud and itemized in the panel');
+// (b) Message deletion reindex.
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'zero' }, { is_user: false, mes: 'one' }, { is_user: false, mes: 'The gate was iron.' });
+await driveAsk('<edits>[{"id":2,"find":"iron","replace":"steel"}]</edits>');
+ok(ctx.chat[2].mes === 'The gate was steel.', 'sim setup: third chat edit applied');
+ctx.chat.splice(0, 1);   // the user deleted message #0 \u2014 every later index shifts down
+clickFresh('cc_undo');
+await sleep(300);
+ok(ctx.chat.length === 2 && ctx.chat[0].mes === 'one' && ctx.chat[1].mes === 'The gate was steel.', 'undo-after-deletion: no message received stale text after the reindex');
+ok(ccLogText().some(t => /SKIPPED/.test(t) && /no longer exists/.test(t)), 'undo-after-deletion: the refusal was loud');
+// (c) External memory write (Summaryception interop).
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+ctx.chatMetadata.summary_memory = 'The blade is iron.';
+await driveAsk('<memedits>[{"path":"summary_memory","find":"iron","replace":"steel"}]</memedits>');
+ok(String(ctx.chatMetadata.summary_memory) === 'The blade is steel.', 'sim setup: the memory edit applied');
+ctx.chatMetadata.summary_memory += '\n[Summaryception] a new beat was logged.';
+clickFresh('cc_undo');
+await sleep(300);
+ok(String(ctx.chatMetadata.summary_memory).includes('new beat was logged'), 'undo-after-external-write: the co-extension\u2019s newer memory survived');
+ok(ccLogText().some(t => /summary_memory/.test(t) && /changed since the apply/.test(t)), 'undo-after-external-write: the refusal named the drifted key');
+// (d) World-Info editor edit.
+const wiStore = new Map();
+ctx.loadWorldInfo = async (book) => { const d = wiStore.get(book); return d ? JSON.parse(JSON.stringify(d)) : null; };
+ctx.saveWorldInfo = async (book, data) => { wiStore.set(book, JSON.parse(JSON.stringify(data))); return true; };
+wiStore.set('gatebook', { entries: { '0': { uid: 0, key: ['blade'], keysecondary: [], comment: 'Blade', content: 'iron blade' } } });
+CA.wiBooks = 'gatebook';   // wiCanEdit() requires at least one effective book
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+await driveAsk('<wiedits>[{"book":"gatebook","uid":0,"find":"iron","replace":"steel"}]</wiedits>');
+ok(String(wiStore.get('gatebook').entries['0'].content) === 'steel blade', 'sim setup: the worldbook edit applied');
+wiStore.get('gatebook').entries['0'].content = 'steel blade (polished by hand in the WI editor)';
+wiStore.get('gatebook').entries['1'] = { uid: 1, key: ['extra'], keysecondary: [], comment: 'Extra', content: 'user-added entry' };
+clickFresh('cc_undo');
+await sleep(300);
+const bookAfterUndo = wiStore.get('gatebook');
+ok(String(bookAfterUndo.entries['0'].content).includes('polished by hand') && !!bookAfterUndo.entries['1'], 'undo-after-WI-editor-edit: hand edits and user-added entries survived \u2014 the blind whole-book restore was refused');
+ok(ccLogText().some(t => /worldbook/.test(t) && /gatebook/.test(t) && /changed since the apply/.test(t)), 'undo-after-WI-editor-edit: the refusal named the worldbook');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
