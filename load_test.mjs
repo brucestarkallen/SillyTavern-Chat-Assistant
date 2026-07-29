@@ -880,6 +880,25 @@ const raceEntries = Object.keys(wiStore.get('racebook').entries).length;
 ok(raceEntries === 1, 'double-click Apply-all during a slow save created exactly ONE worldbook entry (got ' + raceEntries + ')');
 ok(ccLogText().some(t => /Already applying/.test(t)), 'the re-entrant click was told a run is in progress, not silently ignored');
 
+console.log('== v2.68.0 behavior: fuzzy memory anchors must be unique across ALL fields ==');
+// Two ledger fields differ by ONE word from the anchor (fuzzy ~0.89, no exact
+// match): the old first-match-wins fallback would have written into whichever
+// field enumerated first. The collect-then-decide guard must refuse — and a
+// path-scoped retry of the same anchor must apply precisely.
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+clickFresh('cc_dismissall');
+await sleep(50);
+ctx.chatMetadata.summary_ledger = {
+    jillian: { state: 'Jillian is at the academy library, studying wards.' },
+    bram: { state: 'Jillian is at the academy library, studying tomes.' },
+};
+await driveAsk('<memedits>[{"find":"Jillian is at the academy library, studying scrolls.","replace":"Jillian is at the academy observatory, studying wards."}]</memedits>');
+ok(String(ctx.chatMetadata.summary_ledger.jillian.state).includes('library') && String(ctx.chatMetadata.summary_ledger.bram.state).includes('library'), 'cross-field fuzzy anchor: BOTH lookalike fields untouched \u2014 first-match corruption refused');
+ok(ccLogText().some(t => /No edits applied/.test(t)), 'cross-field fuzzy anchor: the refusal was loud (failed card + explanation), not a silent skip');
+await driveAsk('<memedits>[{"path":"summary_ledger.jillian.state","find":"Jillian is at the academy library, studying scrolls.","replace":"Jillian is at the academy observatory, studying wards."}]</memedits>');
+ok(String(ctx.chatMetadata.summary_ledger.jillian.state).includes('observatory') && String(ctx.chatMetadata.summary_ledger.bram.state).includes('library'), 'the same anchor with an explicit path applied to exactly the named field');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

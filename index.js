@@ -2123,17 +2123,23 @@
         return { ok: true, affected };
     }
 
-    function walkReplace(node, find, replace, path) {
+    // Collect EVERY field where the anchor matches (exact / normalized / fuzzy)
+    // WITHOUT mutating anything. locate() already rejects ambiguity inside a
+    // single string; this adds the missing cross-field check: an anchor that
+    // fuzzy-hits two different fields (repetitive ledger text, e.g. two
+    // characters' near-identical state fields) must refuse loudly, not
+    // first-match into whichever field happens to be enumerated first.
+    function walkFind(node, find, path, out) {
         if (Array.isArray(node)) {
             for (let i = 0; i < node.length; i++) {
                 const v = node[i];
                 if (typeof v === 'string') {
                     const loc = locate(v, find);
                     if (loc && loc.ambiguous) return { ambiguous: true };
-                    if (loc) { node[i] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '[' + i + ']', fuzzy: !!loc.fuzzy }; }
+                    if (loc) out.push({ container: node, key: i, val: v, loc: loc, path: path + '[' + i + ']', fuzzy: !!loc.fuzzy });
                 } else if (v && typeof v === 'object') {
-                    const r = walkReplace(v, find, replace, path + '[' + i + ']');
-                    if (r) return r;
+                    const r = walkFind(v, find, path + '[' + i + ']', out);
+                    if (r && r.ambiguous) return r;
                 }
             }
             return null;
@@ -2142,10 +2148,10 @@
             if (typeof v === 'string') {
                 const loc = locate(v, find);
                 if (loc && loc.ambiguous) return { ambiguous: true };
-                if (loc) { node[k] = v.slice(0, loc.start) + replace + v.slice(loc.end); return { path: path + '.' + k, fuzzy: !!loc.fuzzy }; }
+                if (loc) out.push({ container: node, key: k, val: v, loc: loc, path: path + '.' + k, fuzzy: !!loc.fuzzy });
             } else if (v && typeof v === 'object') {
-                const r = walkReplace(v, find, replace, path + '.' + k);
-                if (r) return r;
+                const r = walkFind(v, find, path + '.' + k, out);
+                if (r && r.ambiguous) return r;
             }
         }
         return null;
@@ -2349,26 +2355,25 @@
             const totalExact = memCountExact(edit.find);
             if (totalExact > 1) return { ok: false, reason: 'anchor matches ' + totalExact + ' places across memory \u2014 give a longer unique excerpt' };
         }
+        // Gather ALL candidate fields across memory first, then commit: the edit
+        // applies iff the anchor hits exactly ONE field. Two or more fields (only
+        // reachable via fuzzy/normalized matching — exact duplicates are already
+        // guarded above) is cross-field ambiguity: refuse and ask for a longer
+        // excerpt or an explicit path, never first-match into the wrong ledger.
+        const cands = [];
         for (const [key, val] of Object.entries(md)) {
             if (key === MODULE || !re.test(key) || val == null) continue;
             if (typeof val === 'string') {
                 const loc = locate(val, edit.find);
                 if (loc && loc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
-                if (loc) {
-                    if (!keyBackups.has(key)) keyBackups.set(key, val);
-                    md[key] = val.slice(0, loc.start) + String(edit.replace ?? '') + val.slice(loc.end);
-                    return { ok: true, path: key, fuzzy: !!loc.fuzzy };
-                }
+                if (loc) cands.push({ rootKey: key, container: null, key: null, val: val, loc: loc, path: key, fuzzy: !!loc.fuzzy });
                 continue;
             }
             if (typeof val === 'object') {
-                const backup = JSON.parse(JSON.stringify(val));
-                const hit = walkReplace(val, edit.find, String(edit.replace ?? ''), key);
-                if (hit && hit.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
-                if (hit) {
-                    if (!keyBackups.has(key)) keyBackups.set(key, backup);
-                    return { ok: true, path: hit.path, fuzzy: hit.fuzzy };
-                }
+                const bucket = [];
+                const r = walkFind(val, edit.find, key, bucket);
+                if (r && r.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
+                for (const h of bucket) { h.rootKey = key; cands.push(h); }
             }
         }
         for (const exKey of ['note_prompt', 'cc_critique']) {
@@ -2376,11 +2381,20 @@
             if (typeof exVal !== 'string' || !exVal) continue;
             const exLoc = locate(exVal, edit.find);
             if (exLoc && exLoc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
-            if (exLoc) {
-                if (!keyBackups.has(exKey)) keyBackups.set(exKey, exVal);
-                md[exKey] = exVal.slice(0, exLoc.start) + String(edit.replace ?? '') + exVal.slice(exLoc.end);
-                return { ok: true, path: exKey, fuzzy: !!exLoc.fuzzy };
-            }
+            if (exLoc) cands.push({ rootKey: exKey, container: null, key: null, val: exVal, loc: exLoc, path: exKey, fuzzy: !!exLoc.fuzzy });
+        }
+        if (cands.length > 1) {
+            const where = cands.slice(0, 4).map(x => x.path).join(', ') + (cands.length > 4 ? ', \u2026' : '');
+            return { ok: false, reason: 'anchor matches ' + cands.length + ' different memory fields (' + where + ') \u2014 give a longer unique excerpt, or name the field with "path"' };
+        }
+        if (cands.length === 1) {
+            const hit = cands[0];
+            const rootVal = md[hit.rootKey];
+            if (!keyBackups.has(hit.rootKey)) keyBackups.set(hit.rootKey, typeof rootVal === 'object' && rootVal !== null ? JSON.parse(JSON.stringify(rootVal)) : rootVal);
+            const rep = String(edit.replace ?? '');
+            if (hit.container) hit.container[hit.key] = hit.val.slice(0, hit.loc.start) + rep + hit.val.slice(hit.loc.end);
+            else md[hit.rootKey] = hit.val.slice(0, hit.loc.start) + rep + hit.val.slice(hit.loc.end);
+            return { ok: true, path: hit.path, fuzzy: hit.fuzzy };
         }
         if (typeof edit.replace === 'string' && edit.replace.length >= 8 && memCountExact(edit.replace) > 0) {
             return { ok: false, reason: 'nothing to change \u2014 the replacement text is already in memory (this fix was applied earlier)' };
