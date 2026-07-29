@@ -266,8 +266,8 @@ ok(fnAt > -1, 'episode conclusion routes through onEpisodeConcluded');
 const critAt = SRC.indexOf("await generateCritique(true, 'episode');", fnAt);
 const dirAt = SRC.indexOf('maybeAutoDirector();', fnAt);
 ok(critAt > -1 && dirAt > -1 && critAt < dirAt, 'inside the chain, the editor pass is AWAITED before the next episode is directed (review -> plan order)');
-ok((SRC.match(/onEpisodeConcluded\(chatAt\);/g) || []).length === 2, 'both conclusion paths (episode marker + status check) run the chain');
-ok(SRC.includes('if (concluded) onEpisodeConcluded(chatAt);'), 'status-check path fires the chain AFTER its finally releases the running lock (fired inside it, both steps self-skip)');
+ok((SRC.match(/onEpisodeConcluded\(chatAt\)\.catch\(/g) || []).length === 2, 'both conclusion paths (episode marker + status check) run the chain (fire-and-forget, rejection captured)');
+ok(SRC.includes('if (concluded) onEpisodeConcluded(chatAt).catch('), 'status-check path fires the chain AFTER its finally releases the running lock (fired inside it, both steps self-skip)');
 ok(!SRC.includes('maybeAutoDirector(); // auto mode: chain the next episode immediately'), 'no conclusion path bypasses the editor by auto-directing directly');
 // Live-settings proof: init actually installed the new default and flag.
 const CA = ctx.extensionSettings['continuityCopilot'] || {};
@@ -908,6 +908,66 @@ ok(SRC.includes('saved back as a structured value'), 'structured replaces are pr
 ok(SRC.includes("throw new Error('expected a JSON array or object')"), 'structured hand-edit rejects non-object JSON instead of corrupting the payload');
 ok(SRC.includes("catch (je) {") && SRC.includes('the proposal was left unchanged'), 'invalid JSON in the viewer fails loud and leaves the card unchanged');
 ok(!SRC.includes("showViewer(title, String(e.replace ?? '')"), 'the blind String(e.replace) hand-edit path is gone');
+
+console.log('== v2.68.0 invariants: the low-severity hardening pack ==');
+ok(SRC.includes("your message is back in the box"), '/cc while busy: typed text is parked back in the input, never dropped silently');
+ok(SRC.includes('pendingAutoDirectorRetry = true; return;') && (SRC.match(/releaseAutoDirectorRetry\(\);/g) || []).length >= 7, 'auto-director skip-while-running sets a retry flag, drained by every running-releasing finally (found ' + (SRC.match(/releaseAutoDirectorRetry\(\);/g) || []).length + ' drains, need >= 7)');
+ok(SRC.includes('await streamIt.return?.()'), 'a stopped stream is formally closed (iterator return), not abandoned');
+ok(SRC.includes('INIT_MAX_ATTEMPTS') && SRC.includes('setTimeout(init, 2000)') && SRC.includes('inited = true;\n            console.log(LOG'), 'init failure is retryable with phase guards; inited set only on success');
+ok(SRC.includes('const UNDO_CAP = 50') && SRC.includes('function pushUndoBatch(') && !SRC.includes('undoStack.push({'), 'undo history is bounded and all pushes route through the cap');
+ok(!SRC.includes("writable at path cc_critique) ---"), 'cc_critique is no longer duplicated into the copilot context (author-level block carries it)');
+ok(SRC.includes('function wiRoleNum(') && SRC.includes('role: o.role !== undefined ? wiRoleNum(o.role) : null,'), 'worldbook role is validated/mapped to the numeric enum at parse time');
+ok(SRC.includes('replace(/["\'`\\\\{}[\\]]/g, \'\')'), 'worldbook names are sanitized before slash-command interpolation');
+ok(SRC.includes('concluded by advancing (') && SRC.includes('no [EPISODE_END] marker was emitted'), 'Next/Seed over a live episode records the skipped conclusion in the ledger');
+ok(SRC.includes('for (let guard = 0; guard < 20; guard++)'), 'stripBlocks removes EVERY block per tag (bounded), not just the first');
+
+console.log('== v2.68.0 behavior: send() while busy is loud and loses nothing ==');
+let slow2;
+ctx.ConnectionManagerRequestService = { sendRequest: () => new Promise(r => { slow2 = () => r('ok'); }) };
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+document.getElementById('cc_input').value = 'first question';
+clickFresh('cc_send');
+await sleep(80);
+document.getElementById('cc_input').value = '';
+const toastsBeforeBusy = toasts.length;
+clickFresh('cc_audit');   // a send() entry point while running — must be loud + preserve text
+await sleep(50);
+ok(toasts.length > toastsBeforeBusy && /back in the box/.test(String(toasts[toasts.length - 1])), 'send() while busy is loud, not a silent drop');
+ok(String(document.getElementById('cc_input').value).length > 0, 'send() while busy parked the text back in the input box');
+document.getElementById('cc_input').value = '';
+slow2();
+await sleep(300);
+
+console.log('== v2.68.0 behavior: auto-director skipped mid-run retries when the lock releases ==');
+CA.directorInjectPaused = false;
+CA.critiqueInjectPaused = false;
+CA.directorMode = 'auto';
+CA.directorTwoPass = false;
+CA.directorWatcherPass = false;
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'E1 done.', episode: 1, concluded: true, ts: 1 }, directorEp: 1 };
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+const seq = [];
+let slowRelease;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: (pid, messages) => {
+        const sys = (messages && messages[0] && messages[0].content) || '';
+        if (sys.includes('expert story director')) { seq.push('directive'); return Promise.resolve('Intensity: standard\n1. EPISODE PREMISE \u2014 chained after the lock released.'); }
+        seq.push('copilot');
+        return new Promise(r => { slowRelease = () => r('copilot answer'); });
+    },
+};
+document.getElementById('cc_input').value = 'question while concluded';
+clickFresh('cc_send');
+await sleep(100);   // the copilot run now holds `running`
+for (const f of handlers.get('MESSAGE_RECEIVED') || []) await f(ctx.chat.length - 1);  // auto-direct skips: lock held
+ok(seq.join(',') === 'copilot', 'auto-direct skipped while the lock was held (only the copilot call fired)');
+slowRelease();
+await sleep(400);   // the finally drains the retry flag -> maybeAutoDirector -> next directive
+ok(seq.join(',') === 'copilot,directive', 'the skipped auto-direct fired when the lock released (got: ' + seq.join(',') + ')');
+const dRetry = (ctx.chatMetadata['continuityCopilot'] || {}).director || {};
+ok(dRetry.episode === 2 && !dRetry.concluded && String(dRetry.text || '').includes('chained after the lock released'), 'the retried chain stored a live episode 2');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');

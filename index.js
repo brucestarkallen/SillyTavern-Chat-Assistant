@@ -484,7 +484,15 @@
     let settings = null;
     let pendingEdits = [];   // [{id, find, replace, reason, status}]
     let editsCollapsed = false;
-    let undoStack = [];      // [{label, items:[{id, before}]}]
+    let undoStack = [];      // [{label, items:[{id, before, afterHash}]}]
+    const UNDO_CAP = 50;     // whole-snapshot entries are heavy — bound the stack
+    function pushUndoBatch(batch) {
+        undoStack.push(batch);
+        while (undoStack.length > UNDO_CAP) {
+            undoStack.shift();
+            addBubble('note', 'Undo history is capped at ' + UNDO_CAP + ' batches \u2014 the oldest batch was dropped.');
+        }
+    }
     let running = false;
     let inited = false;
     let stopRequested = false;
@@ -1127,7 +1135,7 @@
                 depth: o.depth !== undefined ? o.depth : null,
                 order: o.order !== undefined ? Number(o.order) : null,
                 probability: o.trigger !== undefined ? Number(o.trigger) : (o.probability !== undefined ? Number(o.probability) : null),
-                role: o.role !== undefined ? o.role : null,
+                role: o.role !== undefined ? wiRoleNum(o.role) : null,
                 reason: o.reason ? String(o.reason) : '',
                 editStatus: 'pending',
             });
@@ -1143,6 +1151,14 @@
     }
     // position: accept named ('before_char'|'after_char'|'an_top'|'an_bottom'|'at_depth') or raw number.
     const WI_POS = { before_char: 0, after_char: 1, an_top: 2, an_bottom: 3, at_depth: 4 };
+    // role: ST stores it NUMERIC (0 system / 1 user / 2 assistant). A model that
+    // emits "role": "system" must not write a string into the saved book.
+    const WI_ROLE = { system: 0, user: 1, assistant: 2 };
+    function wiRoleNum(v) {
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 2) return Math.floor(v);
+        if (typeof v === 'string' && WI_ROLE[v.toLowerCase()] !== undefined) return WI_ROLE[v.toLowerCase()];
+        return null;
+    }
     function applyWiPosition(entry, pos, depth) {
         if (pos !== null && pos !== undefined) {
             if (typeof pos === 'number') entry.position = pos;
@@ -1170,7 +1186,9 @@
 
     async function wiCreateBook(name, firstEntry) {
         const c = ctx();
-        const clean = String(name || '').trim();
+        // The name is later interpolated into a /world slash command — strip
+        // characters that break slash parsing (quotes, backslashes, braces).
+        const clean = String(name || '').replace(/["'`\\{}[\]]/g, '').replace(/\s+/g, ' ').trim();
         if (!clean) return { ok: false, reason: 'book name required' };
         // Refuse if it already exists (avoid clobbering).
         try {
@@ -1311,11 +1329,11 @@
             } catch (e) { /* ignore */ }
         }
 
-        try {
-            const md3 = c.chatMetadata || c.chat_metadata || {};
-            const crit = typeof md3.cc_critique === 'string' ? md3.cc_critique.trim() : '';
-            if (crit) parts.push('--- editor notes (writable at path cc_critique) ---\n' + crit);
-        } catch (e) { /* ignore */ }
+        // NOTE: cc_critique is deliberately NOT included here — authorLevelBlock()
+        // already injects it as [EDITOR CRITIQUE] with better framing, so listing
+        // it again would bill the same standing notes twice per request. Editing
+        // still resolves it via the path-scoped and memory-wide extras in
+        // applyMemOneInner, and Peek surfaces it in the panel.
 
         return parts.length ? parts.join('\n\n') : '(no memory extension data detected — pattern: ' + settings.memoryKeyPattern + ')';
     }
@@ -1547,13 +1565,14 @@
                     if (typeof res === 'function') {
                         let acc = '';
                         let reasoning = '';
+                        let streamIt = null;
                         try {
                             // Manual iteration so every inter-chunk gap sits under the
                             // stall deadline — a stream that opens and then goes quiet
                             // forever is the same wedge as a promise that never settles.
-                            const it = res()[Symbol.asyncIterator]();
+                            streamIt = res()[Symbol.asyncIterator]();
                             while (true) {
-                                const step = await raceTransport(it.next(), 'stream stalled mid-response');
+                                const step = await raceTransport(streamIt.next(), 'stream stalled mid-response');
                                 if (step.done) break;
                                 const chunk = step.value;
                                 if (stopRequested) break;
@@ -1567,6 +1586,12 @@
                                 if (onPartial) onPartial(acc, reasoning);
                             }
                         } catch (se) { if (!stopRequested) throw se; }
+                        finally {
+                            // Formally close the stream on user stop/abort: without
+                            // return(), a backend generator keeps producing to
+                            // completion server-side after we stopped listening.
+                            if (stopRequested && streamIt) { try { await streamIt.return?.(); } catch (e) { /* ignore */ } }
+                        }
                         if (reasoning && !/<think|<reasoning/i.test(acc)) {
                             return '<think>' + reasoning + '</think>\n' + acc;
                         }
@@ -1724,9 +1749,14 @@
     function stripBlocks(text) {
         let out = String(text || '');
         const cut = (tag, label) => {
-            const b = findBlock(out, tag);
-            if (!b) return;
-            out = out.slice(0, b.start) + (label || '') + out.slice(b.end);
+            // Remove EVERY block of this tag, not just the first found — a reply
+            // with two <edits> blocks (only the last is parsed, by design) used to
+            // leave the first as raw JSON in the displayed bubble. Bounded loop.
+            for (let guard = 0; guard < 20; guard++) {
+                const b = findBlock(out, tag);
+                if (!b) return;
+                out = out.slice(0, b.start) + (label || '') + out.slice(b.end);
+            }
         };
         cut('fetch', '');
         cut('edits', '[proposed edits below]');
@@ -2539,7 +2569,7 @@
             if (chatApplied.length) labelParts.push(chatApplied.map(a => '#' + a.id).join(', '));
             if (memPaths.length) labelParts.push('memory: ' + memPaths.join(', '));
             if (wiApplied.length) labelParts.push('worldbook: ' + wiApplied.join(', '));
-            undoStack.push({ label: labelParts.join(' + '), items, srcEdits: appliedRefs });
+            pushUndoBatch({ label: labelParts.join(' + '), items, srcEdits: appliedRefs });
             if (chatApplied.length) await commitChanges(chatApplied.map(a => a.id));
             if (memPaths.length) { saveMeta(); applyCritiqueInjection(); }
             const total = chatApplied.length + memPaths.length + wiApplied.length;
@@ -2803,7 +2833,16 @@
 
     async function send(userText) {
         userText = String(userText || '').trim();
-        if (!userText || running) return;
+        if (!userText) return;
+        if (running) {
+            // Never lose typed text (the /cc slash path used to drop it
+            // silently): park it back in the box and say why — the user sends
+            // it the moment the current run finishes.
+            const inp = el('cc_input');
+            if (inp && !String(inp.value || '').trim()) inp.value = userText;
+            toast('Still working on the previous request \u2014 your message is back in the box; send it when this finishes.', 'warning');
+            return;
+        }
         const c = ctx();
         if (!Array.isArray(c.chat) || !c.chat.length) {
             toast('No chat is loaded.', 'warning');
@@ -3079,6 +3118,7 @@
         } finally {
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
     }
 
@@ -3283,7 +3323,7 @@
             const text = sp.rest.trim();
             if (!text) throw new Error(sp.think ? 'answer consumed by thinking \u2014 raise Max output tokens or lower reasoning effort' : 'empty critique');
             md.cc_critique = text;
-            undoStack.push({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur, afterHash: memValueHash(text) }] });
+            pushUndoBatch({ label: 'critique update', items: [{ kind: 'mem', key: 'cc_critique', before: cur, afterHash: memValueHash(text) }] });
             saveMeta();
             applyCritiqueInjection();
             const note = (isAuto ? '\uD83D\uDCDD Auto-critique: ' : '\uD83D\uDCDD Critique updated: ') + critiqueDiff(cur, text) + ' (Undo restores the previous version; \uD83D\uDCDD Peek to view or edit.)' + (settings.critiqueInjectPaused ? ' \u26A0 Notes injection is PAUSED \u2014 stored but not applied until unpaused.' : '');
@@ -3296,6 +3336,7 @@
             busyNote.remove();
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
     }
 
@@ -3403,6 +3444,14 @@
                 else console.warn(LOG, 'watcher pass returned empty \u2014 shipping the showrunner cut');
             }
             const ep = computeEpisodeNumber(mode, prev?.episode, metaRoot().directorEp);
+            // Next/Seed over a LIVE episode advances past it with no [EPISODE_END]
+            // marker — record the transition in the session ledger so the skipped
+            // conclusion is auditable rather than silently overwritten.
+            if ((mode === 'next' || mode === 'seed') && prev && String(prev.text || '').trim() && !prev.concluded) {
+                const advNote = '\uD83C\uDFAC Episode ' + prev.episode + ' concluded by advancing (' + mode + ') \u2014 no [EPISODE_END] marker was emitted; its beats are retired unaired.';
+                addBubble('note', advNote);
+                pushHistory('note', advNote);
+            }
             metaRoot().director = { text, episode: ep, ts: Date.now(), msgAt: Array.isArray(ctx().chat) ? ctx().chat.length : 0 };
             metaRoot().directorEp = Math.max(Number(metaRoot().directorEp) || 0, ep);
             saveMeta();
@@ -3422,6 +3471,7 @@
             busyNote.remove();
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
     }
 
@@ -3519,6 +3569,7 @@
             busyNote.remove();
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
     }
 
@@ -3564,8 +3615,9 @@
             busyNote.remove();
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
-        if (concluded) onEpisodeConcluded(chatAt); // editor reviews the aired episode, then auto mode chains the next
+        if (concluded) onEpisodeConcluded(chatAt).catch(e => console.warn(LOG, 'episode conclusion chain failed', e)); // editor reviews the aired episode, then auto mode chains the next
     }
 
     async function suggestSeeds() {
@@ -3606,6 +3658,7 @@
             busyNote.remove();
             running = false;
             setBusy(false);
+            releaseAutoDirectorRetry();
         }
     }
 
@@ -4767,11 +4820,21 @@
         } catch (e) { console.warn(LOG, 'reconcile failed', e); }
     }
 
+    // Set when auto-director work was skipped because an operation was running;
+    // drained the moment a flow releases the lock, so the chain fires one reply
+    // later instead of leaving a concluded directive live in the injection.
+    let pendingAutoDirectorRetry = false;
+    function releaseAutoDirectorRetry() {
+        if (!pendingAutoDirectorRetry) return;
+        pendingAutoDirectorRetry = false;
+        setTimeout(() => { try { maybeAutoDirector(); } catch (e) { /* ignore */ } }, 50);
+    }
+
     function maybeAutoDirector() {
         try {
             const mode = settings.directorMode || 'off';
             if (mode === 'off') return;
-            if (running) return;
+            if (running) { pendingAutoDirectorRetry = true; return; }
             if (!settings.profileId) return;
             if (settings.directorInjectPaused) return; // paused channel: never burn directive calls the storyteller cannot see
             const d = metaRoot().director;
@@ -4918,7 +4981,7 @@
         let suggestion = '';
         try { suggestion = await suggestChatName(); }
         catch (e) { addBubble('note', 'Name suggestion failed: ' + (e && e.message ? e.message : e)); }
-        finally { busyNote.remove(); running = false; setBusy(false); }
+        finally { busyNote.remove(); running = false; setBusy(false); releaseAutoDirectorRetry(); }
         if (!suggestion) { toast('Could not generate a name \u2014 use Rename this chat to type one.', 'error'); return; }
         if (!sameChat(chatAt)) { addBubble('note', 'Chat changed \u2014 the suggested name was for the previous chat; not renaming.'); return; }
         const chosen = prompt('Rename this chat file to (edit if you like):', suggestion);
@@ -4999,7 +5062,7 @@
                     toast(note, 'success');
                     addBubble('note', note);
                     pushHistory('note', note);
-                    onEpisodeConcluded(chatAt);
+                    onEpisodeConcluded(chatAt).catch(e => console.warn(LOG, 'episode conclusion chain failed', e));
                 } catch (e2) { /* ignore */ }
             });
             if (c.event_types?.GENERATION_STARTED) {
@@ -5015,20 +5078,30 @@
     // Init
     // ------------------------------------------------------------------
 
+    // Phase guards make init retryable: a throw mid-init (e.g. a DOM-timing
+    // edge in buildPanel) used to be terminal because `inited` was set before
+    // the try. Now only completed phases are marked done and a failure
+    // schedules another attempt (bounded), so a transient hiccup self-heals
+    // instead of leaving a dead extension until reload.
+    let initAttempts = 0, panelBuilt = false, menuAdded = false, eventsBound = false, slashRegistered = false;
+    const INIT_MAX_ATTEMPTS = 5;
     function init() {
         if (inited) return;
-        inited = true;
+        if (initAttempts >= INIT_MAX_ATTEMPTS) { console.error(LOG, 'init gave up after ' + INIT_MAX_ATTEMPTS + ' attempts \u2014 reload the page to retry'); return; }
+        initAttempts++;
         try {
             loadSettings();
             purgeCharacterLedger();
-            buildPanel();
+            if (!panelBuilt) { buildPanel(); panelBuilt = true; }
             applyInjections();
-            addMenuButton();
-            bindEvents();
-            registerSlash();
+            if (!menuAdded) { addMenuButton(); menuAdded = true; }
+            if (!eventsBound) { bindEvents(); eventsBound = true; }
+            if (!slashRegistered) { registerSlash(); slashRegistered = true; }
+            inited = true;
             console.log(LOG, 'ready', 'v' + VERSION);
         } catch (e) {
-            console.error(LOG, 'init failed', e);
+            console.error(LOG, 'init failed (attempt ' + initAttempts + '/' + INIT_MAX_ATTEMPTS + ') \u2014 retrying', e);
+            setTimeout(init, 2000);
         }
     }
 
