@@ -852,6 +852,34 @@ const bookAfterUndo = wiStore.get('gatebook');
 ok(String(bookAfterUndo.entries['0'].content).includes('polished by hand') && !!bookAfterUndo.entries['1'], 'undo-after-WI-editor-edit: hand edits and user-added entries survived \u2014 the blind whole-book restore was refused');
 ok(ccLogText().some(t => /worldbook/.test(t) && /gatebook/.test(t) && /changed since the apply/.test(t)), 'undo-after-WI-editor-edit: the refusal named the worldbook');
 
+console.log('== v2.68.0 behavior: Apply is re-entrancy safe (synchronous card claim) ==');
+// A slow save opens the window the old code lost: two Apply-all clicks during
+// the first run's network await must NOT create the entry twice.
+wiStore.set('racebook', { entries: {} });
+CA.wiBooks = 'racebook';
+let saveGate = null;
+ctx.saveWorldInfo = async (book, data) => { if (saveGate) await saveGate; wiStore.set(book, JSON.parse(JSON.stringify(data))); return true; };
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+clickFresh('cc_dismissall');   // isolate: earlier sims returned their cards to pending
+await sleep(50);
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<wiedits>[{"book":"racebook","new_entry":true,"comment":"Canon","content":"the duke is dead","keys":["duke"]}]</wiedits>' };
+document.getElementById('cc_input').value = 'add lore';
+clickFresh('cc_send');
+await sleep(350);
+let releaseSave;
+saveGate = new Promise(r => { releaseSave = r; });
+clickFresh('cc_applyall');
+await sleep(60);            // first run is now parked inside the slow save
+clickFresh('cc_applyall');  // re-entrant click: must skip the claimed card, loudly
+await sleep(60);
+releaseSave();
+await sleep(350);
+saveGate = null;
+const raceEntries = Object.keys(wiStore.get('racebook').entries).length;
+ok(raceEntries === 1, 'double-click Apply-all during a slow save created exactly ONE worldbook entry (got ' + raceEntries + ')');
+ok(ccLogText().some(t => /Already applying/.test(t)), 'the re-entrant click was told a run is in progress, not silently ignored');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

@@ -2434,6 +2434,14 @@
         for (const edit of list) {
             const st = edit.kind === 'wi' ? edit.editStatus : edit.status;
             if (st !== 'pending') continue;
+            // Synchronous claim BEFORE the first await: WI applies yield on
+            // loadWorldInfo/saveWorldInfo, and while a card still reads 'pending'
+            // a second Apply click (Apply-all twice, or Apply-all + a single card)
+            // starts a concurrent run that re-processes it — duplicated worldbook
+            // entries. Claim first; every outcome below overwrites the claim, and
+            // any concurrent run skips a claimed card as non-pending.
+            if (edit.kind === 'wi') edit.editStatus = 'applying\u2026';
+            else edit.status = 'applying\u2026';
             if (!sameChat(chatAt)) {
                 if (edit.kind === 'wi') edit.editStatus = 'chat changed mid-run \u2014 not applied';
                 else edit.status = 'chat changed mid-run \u2014 not applied';
@@ -2445,6 +2453,7 @@
                 else edit.status = 'applied earlier \u2014 duplicate card';
                 continue;
             }
+            try {
             if (edit.kind === 'mem') {
                 const res = applyMemOne(edit, keyBackups);
                 if (res.ok) {
@@ -2492,6 +2501,12 @@
                     edit.status = 'failed: ' + res.reason;
                 }
             }
+            } catch (cardErr) {
+                // A card must never wedge in the claimed state on an unexpected
+                // throw — fail it loudly so it can be retried or re-proposed.
+                const reason = 'failed: ' + (cardErr && cardErr.message ? cardErr.message : String(cardErr));
+                if (edit.kind === 'wi') edit.editStatus = reason; else edit.status = reason;
+            }
         }
         const items = [...chatApplied];
         // Undo drift fingerprints: the state OUR run left each target in. Undo
@@ -2523,7 +2538,11 @@
             // Nothing was applied \u2014 tell the user why instead of silently doing nothing.
             const anyPending = list.some(e => (e.kind === 'wi' ? e.editStatus : e.status) === 'pending');
             const anyFailed = list.some(e => String(e.kind === 'wi' ? e.editStatus : e.status).startsWith('failed'));
-            if (!anyPending && anyFailed) {
+            const anyApplying = list.some(e => String(e.kind === 'wi' ? e.editStatus : e.status) === 'applying\u2026');
+            if (!anyPending && anyApplying && !anyFailed) {
+                // Re-entrant click while a run holds the claims — be loud, not silent.
+                addBubble('note', 'Already applying \u2014 wait for the current run to finish.');
+            } else if (!anyPending && anyFailed) {
                 addBubble('note', 'No edits applied \u2014 the proposed change(s) failed (likely the target text changed, or a stale card). Ask the copilot to re-propose against the current text.');
             } else if (!list.length) {
                 addBubble('note', 'No pending edits to apply.');
