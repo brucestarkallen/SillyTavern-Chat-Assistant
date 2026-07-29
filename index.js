@@ -4461,6 +4461,35 @@
         return raw.split(/[,\n;]+/).map(function (s) { return s.trim().replace(/^["'\[]+|["'\]]+$/g, '').trim(); }).filter(Boolean);
     }
 
+    // Which field of a card is hand-editable, and how it round-trips. The
+    // memedit schema has three payload channels — replace (possibly a JSON
+    // array/object for structural edits), append, remove — plus WI content and
+    // chat replace. Editing the WRONG channel (e.g. the unused empty replace of
+    // an append card) silently did nothing; String()-ing a structured replace
+    // destroyed it ("[object Object]"). Structured values round-trip as JSON.
+    function cardPayloadSpec(edit) {
+        if (!edit || edit.deleteEntry || edit.remove !== undefined) return null;
+        if (edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) return null;
+        const isAppend = edit.append !== undefined && edit.find == null && (edit.replace === undefined || edit.replace === '');
+        const cur = isAppend ? edit.append : edit.replace;
+        if (cur === undefined) return null;
+        const json = cur !== null && typeof cur === 'object';
+        return {
+            isAppend: isAppend,
+            json: json,
+            get: () => json ? JSON.stringify(cur, null, 2) : String(cur ?? ''),
+            set: (t) => {
+                if (json) {
+                    const v = JSON.parse(t);   // throws on invalid JSON — caller catches
+                    if (!v || typeof v !== 'object') throw new Error('expected a JSON array or object');
+                    if (isAppend) edit.append = v; else edit.replace = v;
+                } else {
+                    if (isAppend) edit.append = String(t); else edit.replace = String(t);
+                }
+            },
+        };
+    }
+
     function renderEditCards() {
         const box = el('cc_edits');
         if (!box) return;
@@ -4545,8 +4574,8 @@
             if (sstr.indexOf('applied') === 0) card.style.cssText = 'border-left:3px solid rgba(90,200,130,0.9);opacity:0.58;';
             else if (sstr.indexOf('failed') === 0) card.style.cssText = 'border-left:3px solid rgba(235,150,55,0.95);background:rgba(235,150,55,0.07);';
             else if (sstr.indexOf('skipped') === 0) card.style.cssText = 'opacity:0.5;';
-            // Which cards support inline replacement-text editing: anything with a replace/content payload.
-            const canEditText = !edit.deleteEntry && !(edit.hide !== null && edit.hide !== undefined && edit.find == null && !edit.replace) && (edit.replace !== undefined) && edit.remove === undefined;
+            // Which cards support inline payload editing — and via which channel.
+            const canEditText = !!cardPayloadSpec(edit);
             card.innerHTML =
                 '<div class="cc_card_top"><b>' + label + '</b>' + (wiDetail ? '<i style="opacity:0.85;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + wiDetail + '</i>' : '') + '<span style="flex:1 1 auto;"></span>' +
                 (st === 'pending'
@@ -4597,9 +4626,15 @@
                 const i = Number(btn.getAttribute('data-cc-editcard'));
                 const e = pendingEdits[i];
                 if (!e) return;
-                const title = '\u270E Edit the replacement text before applying';
-                showViewer(title, String(e.replace ?? ''), (t) => {
-                    e.replace = String(t);
+                const spec = cardPayloadSpec(e);
+                if (!spec) return;
+                const title = '\u270E Edit the ' + (spec.isAppend ? 'appended text' : 'replacement text') + ' before applying' + (spec.json ? ' (JSON \u2014 saved back as a structured value)' : '');
+                showViewer(title, spec.get(), (t) => {
+                    try { spec.set(t); }
+                    catch (je) {
+                        toast('Invalid JSON \u2014 the proposal was left unchanged: ' + (je && je.message ? je.message : je), 'error');
+                        return;
+                    }
                     e.edited = true;
                     if (e.kind === 'wi' && e.find === null) e.hasContent = true;
                     renderEditCards();

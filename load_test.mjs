@@ -899,6 +899,16 @@ ok(ccLogText().some(t => /No edits applied/.test(t)), 'cross-field fuzzy anchor:
 await driveAsk('<memedits>[{"path":"summary_ledger.jillian.state","find":"Jillian is at the academy library, studying scrolls.","replace":"Jillian is at the academy observatory, studying wards."}]</memedits>');
 ok(String(ctx.chatMetadata.summary_ledger.jillian.state).includes('observatory') && String(ctx.chatMetadata.summary_ledger.bram.state).includes('library'), 'the same anchor with an explicit path applied to exactly the named field');
 
+console.log('== v2.68.0 invariants: card hand-edit is payload-channel aware ==');
+// The ✎ viewer used to String() every payload: structured replaces died as
+// "[object Object]" and append cards edited a field the apply path never reads.
+ok(SRC.includes('function cardPayloadSpec('), 'card hand-edit routes through a payload-channel spec');
+ok(SRC.includes('const isAppend = edit.append !== undefined'), 'append cards edit the append channel, not the dead replace field');
+ok(SRC.includes('saved back as a structured value'), 'structured replaces are presented as JSON');
+ok(SRC.includes("throw new Error('expected a JSON array or object')"), 'structured hand-edit rejects non-object JSON instead of corrupting the payload');
+ok(SRC.includes("catch (je) {") && SRC.includes('the proposal was left unchanged'), 'invalid JSON in the viewer fails loud and leaves the card unchanged');
+ok(!SRC.includes("showViewer(title, String(e.replace ?? '')"), 'the blind String(e.replace) hand-edit path is gone');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
