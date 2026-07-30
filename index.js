@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.68.0';
+    const VERSION = '2.69.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -502,6 +502,17 @@
     // way to cancel it. It must NOT be called for Connection-Profile requests, or a
     // copilot Stop would also kill the user's unrelated MAIN story generation.
     let usingFallbackGen = false;
+
+    // One canonical place where a run begins. `stopRequested` is scoped to the
+    // RUN, not to a single LLM call: it used to be cleared at the top of
+    // callLLM, so a Stop pressed BETWEEN calls of the same run (a fetch round,
+    // a worldbook read, the showrunner/watcher passes) was erased and the run
+    // opened another request the user had already cancelled.
+    function beginRun() {
+        running = true;
+        stopRequested = false;
+        setBusy(true);
+    }
 
     // ------------------------------------------------------------------
     // Small helpers
@@ -1555,7 +1566,11 @@
         const c = ctx();
         const pid = settings.profileId;
         const maxTok = Math.min(32768, Math.max(256, Number(maxTokOverride) || Number(settings.maxTokens) || 4096));
-        stopRequested = false;
+        // A run the user already stopped never opens another request. Every LLM
+        // call in the extension funnels through here, so this single refusal
+        // covers fetch rounds, think-recovery, auto-continue, and all three
+        // director passes. The flag is cleared by beginRun(), never here.
+        if (stopRequested) return '';
         try { abortCtl = new AbortController(); } catch (e) { abortCtl = null; }
 
         if (pid && c.ConnectionManagerRequestService?.sendRequest) {
@@ -2457,6 +2472,17 @@
         } catch (err) { /* never let bookkeeping break an apply run */ }
     }
 
+    // Fire-and-forget from click handlers: without this the commit tail's throw
+    // was an invisible unhandled rejection AND renderEditCards() never ran, so
+    // claimed cards sat reading "applying\u2026" forever with no way back.
+    function applyRunFailed(err) {
+        const m = 'Apply run failed: ' + (err && err.message ? err.message : err) + ' \u2014 nothing further was applied.';
+        console.error(LOG, 'applyEdits rejected', err);
+        addBubble('note', m);
+        toast(m, 'error');
+        try { renderEditCards(); } catch (e) { /* ignore */ }
+    }
+
     async function applyEdits(list) {
         // Applying is a multi-card run with awaits between cards. If the user
         // switches chats mid-run, every later find/replace would search the NEW
@@ -2598,6 +2624,22 @@
     async function undoLast() {
         const batch = undoStack.pop();
         if (!batch) { toast('Nothing to undo.', 'warning'); return; }
+        try {
+            await undoRestore(batch);
+        } catch (err) {
+            // A throw mid-restore (a worldbook save failure, a hostile provider)
+            // must not CONSUME the batch: popping before the work meant the next
+            // Undo press silently reverted an OLDER batch instead. Put it back.
+            // Items already restored fail their own drift guard on the retry and
+            // are refused loudly, so a retry can never double-apply.
+            undoStack.push(batch);
+            const em = 'Undo failed: ' + (err && err.message ? err.message : err) + ' \u2014 the batch was kept; press \u21A9 Undo again to retry.';
+            addBubble('note', em);
+            toast('Undo failed \u2014 batch kept for retry.', 'error');
+        }
+    }
+
+    async function undoRestore(batch) {
         const c = ctx();
         // Captured once: restores must target the chat this batch belongs to even
         // if the user switches mid-undo (the awaits below yield). metaRoot() called
@@ -2613,7 +2655,11 @@
         for (let _i = batch.items.length - 1; _i >= 0; _i--) {
             const item = batch.items[_i];
             if (item.kind === 'mem') {
-                const md = c.chatMetadata || c.chat_metadata;
+                // The CAPTURED metadata object, not the live one: this function
+                // deliberately captures chatAt/rootAt so restores target the chat
+                // the batch belongs to even if the user switches during the awaits
+                // below. Reading c.chatMetadata fresh here defeated exactly that.
+                const md = chatAt.md || c.chatMetadata || c.chat_metadata;
                 if (!md) { refused.push('memory "' + item.key + '" (no chat metadata)'); continue; }
                 // Drift guard: restore only when the key is still EXACTLY what our
                 // apply left behind. A co-extension (Summaryception rewrites its
@@ -2880,8 +2926,7 @@
 
     async function runGeneration(opts = {}) {
         if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const chatAt = chatRef();               // which chat asked
         const sessObj = meta();                 // which session asked — replies go HERE
         const sessAtStart = metaRoot().activeId;
@@ -3291,8 +3336,7 @@
 
     async function generateCritique(isAuto, reason) {
         if (running) { if (!isAuto) toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const busyNote = addBubble('busy', reason === 'episode' ? 'editor reviewing the concluded episode\u2026' : isAuto ? 'auto-editor reviewing the story\u2026' : 'the editor is reviewing\u2026');
         const tickC = busyTicker(busyNote, reason === 'episode' ? 'editor reviewing the concluded episode' : isAuto ? 'auto-editor reviewing the story' : 'the editor is reviewing');
         const chatAt = chatRef();
@@ -3383,8 +3427,7 @@
 
     async function generateDirective(mode, isAuto, seedText) {
         if (running) { if (!isAuto) toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const busyNote = addBubble('busy', mode === 'seed' ? 'directing your episode\u2026' : mode === 'next' ? 'directing the next episode\u2026' : 'directing\u2026');
         const chatAt = chatRef();
         let tick = null;
@@ -3534,8 +3577,7 @@
 
     async function directorEdit(instruction) {
         if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const busyNote = addBubble('busy', 'revising the directive\u2026');
         const tickX = busyTicker(busyNote, 'revising the directive around your direction');
         const chatAt = chatRef();
@@ -3581,8 +3623,7 @@
             return;
         }
         if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const busyNote = addBubble('busy', 'checking episode progress\u2026');
         const tickX = busyTicker(busyNote, 'checking episode progress');
         const chatAt = chatRef();
@@ -3622,8 +3663,7 @@
 
     async function suggestSeeds() {
         if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
-        running = true;
-        setBusy(true);
+        beginRun();
         const busyNote = addBubble('busy', 'sketching episode seeds\u2026');
         const tickX = busyTicker(busyNote, 'brainstorming seeds');
         const chatAt = chatRef();
@@ -4303,6 +4343,11 @@
         div.style.borderRadius = '12px';
         div.innerHTML = esc(text);
         attachMsgIcons(div, kind, hidx);
+        // Degrade like renderHistory/setBusy when the panel is not built (init
+        // retry, panel removed). Throwing here escaped the caller's pre-try lock
+        // acquisition and wedged `running` on until reload. The detached node is
+        // still returned so callers' .remove()/.innerHTML stay valid.
+        if (!log) return div;
         const pinned = kind === 'user' || (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
         log.appendChild(div);
         if (pinned) log.scrollTop = log.scrollHeight;
@@ -4323,6 +4368,7 @@
         html += mdLite(stripBlocks(rest) || '(no text)');
         div.innerHTML = html;
         attachMsgIcons(div, 'ai', hidx);
+        if (!log) return div;
         const pinned = (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
         log.appendChild(div);
         if (pinned) log.scrollTop = log.scrollHeight;
@@ -4648,7 +4694,7 @@
         box.innerHTML = '';
         box.appendChild(frag);
 
-        el('cc_applyall')?.addEventListener('click', () => applyEdits(pendingEdits));
+        el('cc_applyall')?.addEventListener('click', () => applyEdits(pendingEdits).catch(applyRunFailed));
         el('cc_dismissall')?.addEventListener('click', () => {
             pendingEdits = [];
             renderEditCards();
@@ -4671,7 +4717,7 @@
         box.querySelectorAll('[data-cc-apply]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const i = Number(btn.getAttribute('data-cc-apply'));
-                applyEdits([pendingEdits[i]]);
+                applyEdits([pendingEdits[i]]).catch(applyRunFailed);
             });
         });
         box.querySelectorAll('[data-cc-editcard]').forEach(btn => {
@@ -4834,9 +4880,12 @@
         try {
             const mode = settings.directorMode || 'off';
             if (mode === 'off') return;
-            if (running) { pendingAutoDirectorRetry = true; return; }
             if (!settings.profileId) return;
             if (settings.directorInjectPaused) return; // paused channel: never burn directive calls the storyteller cannot see
+            // `running` is the ONLY transient precondition, so it is tested last:
+            // arming the retry above these checks queued a wake-up that could only
+            // ever no-op (no profile / paused channel).
+            if (running) { pendingAutoDirectorRetry = true; return; }
             const d = metaRoot().director;
             if (mode === 'auto') {
                 if (!d) { generateDirective('new', true); return; }
@@ -4975,7 +5024,7 @@
         const c = ctx();
         if (!Array.isArray(c.chat)) { toast('No chat loaded.', 'error'); return; }
         if (!settings.profileId) { toast('Set a Connection Profile first (gear settings) to auto-name.', 'error'); return; }
-        running = true; setBusy(true);
+        beginRun();
         const chatAt = chatRef();
         const busyNote = addBubble('busy', 'reading the thread to suggest a chat name\u2026');
         let suggestion = '';

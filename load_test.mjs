@@ -969,6 +969,90 @@ ok(seq.join(',') === 'copilot,directive', 'the skipped auto-direct fired when th
 const dRetry = (ctx.chatMetadata['continuityCopilot'] || {}).director || {};
 ok(dRetry.episode === 2 && !dRetry.concluded && String(dRetry.text || '').includes('chained after the lock released'), 'the retried chain stored a live episode 2');
 
+console.log('== v2.69.0 invariants: the stop flag belongs to the RUN, not to one call ==');
+// Regression: `stopRequested` was cleared at the top of callLLM. A run makes MANY
+// calls (fetch rounds, worldbook reads, think-recovery, three director passes), so
+// a Stop pressed in any gap between them was erased and the run opened a request
+// the user had already cancelled.
+ok(/function beginRun\(\) \{\n        running = true;\n        stopRequested = false;\n        setBusy\(true\);\n    \}/.test(SRC), 'beginRun() is the one place a run starts: takes the lock AND clears the stop flag');
+ok((SRC.match(/\n        running = true;/g) || []).length === 1, 'the lock is taken in exactly one place (beginRun), nowhere else');
+ok((SRC.match(/\n        beginRun\(\);/g) || []).length === 7, 'all 7 run entrypoints route through beginRun (found ' + (SRC.match(/\n        beginRun\(\);/g) || []).length + ', need 7)');
+ok(!/const maxTok = [^\n]*\n        stopRequested = false;/.test(SRC), 'callLLM no longer clears the stop flag');
+ok(/if \(stopRequested\) return '';\n        try \{ abortCtl = new AbortController/.test(SRC), 'callLLM refuses to open a request when the run is already stopped');
+
+console.log('== v2.69.0 invariants: undo cannot lose a batch or write to the wrong chat ==');
+ok(SRC.includes('async function undoRestore(batch)'), 'the undo restore body is separable from the pop, so a throw is catchable');
+ok(/\} catch \(err\) \{[\s\S]{0,500}?undoStack\.push\(batch\);/.test(SRC), 'a throw mid-undo puts the batch BACK instead of consuming it');
+ok(/const md = chatAt\.md \|\| c\.chatMetadata \|\| c\.chat_metadata;/.test(SRC), 'undo restores memory into the CAPTURED chat, not whatever chat is open now');
+
+console.log('== v2.69.0 invariants: no throw escapes a lock acquisition ==');
+ok(/attachMsgIcons\(div, kind, hidx\);\n[\s\S]{0,400}?\n        if \(!log\) return div;/.test(SRC), 'addBubble degrades when the panel is absent instead of throwing past the caller\u2019s lock');
+ok(/attachMsgIcons\(div, 'ai', hidx\);\n        if \(!log\) return div;/.test(SRC), 'addAiBubble degrades when the panel is absent');
+ok(SRC.includes('function applyRunFailed(') && (SRC.match(/\.catch\(applyRunFailed\)/g) || []).length === 2, 'both fire-and-forget applyEdits call sites surface a rejected run (found ' + (SRC.match(/\.catch\(applyRunFailed\)/g) || []).length + ', need 2)');
+
+console.log('== v2.69.0 invariants: the auto-director retry is armed only when it can fire ==');
+{
+    const mad = SRC.slice(SRC.indexOf('function maybeAutoDirector()'), SRC.indexOf('async function onEpisodeConcluded'));
+    const iProfile = mad.indexOf('if (!settings.profileId) return;');
+    const iPaused = mad.indexOf('if (settings.directorInjectPaused) return;');
+    const iRunning = mad.indexOf('if (running) { pendingAutoDirectorRetry = true; return; }');
+    ok(iProfile > 0 && iPaused > 0 && iRunning > iProfile && iRunning > iPaused, 'running (the only transient condition) is tested AFTER profile and paused');
+}
+
+console.log('== v2.69.0 behavior: a Stop pressed BETWEEN calls opens no further request ==');
+CA.directorMode = 'off';
+CA.critiqueAuto = 0;
+CA.critiqueOnEpisode = false;
+CA.fetchRounds = 3;
+wiStore.set('stopbook', { entries: { '0': { uid: 0, key: ['x'], keysecondary: [], comment: 'X', content: 'body text' } } });
+CA.wiBooks = 'stopbook';
+ctx.chatMetadata['continuityCopilot'] = {};
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+let stopRunCalls = 0;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async () => {
+        stopRunCalls++;
+        return stopRunCalls === 1 ? '<wifetch>["stopbook#0"]</wifetch>' : 'THIS SECOND CALL MUST NOT HAPPEN';
+    },
+};
+const realLoadWI = ctx.loadWorldInfo;
+ctx.loadWorldInfo = async (book) => {
+    // The user hits Stop during the worldbook read — precisely the gap between the
+    // round's stop-check and the next callLLM. This is the window the old code erased.
+    clickFresh('cc_send');
+    return realLoadWI(book);
+};
+document.getElementById('cc_input').value = 'read the worldbook then answer';
+clickFresh('cc_send');
+await sleep(600);
+ctx.loadWorldInfo = realLoadWI;
+ok(stopRunCalls === 1, 'Stop during the inter-call gap prevented the next request (requests fired: ' + stopRunCalls + ', must be 1)');
+ok(ccLogText().some(t => /Generation stopped/.test(t)), 'the stopped run announced itself instead of continuing silently');
+
+console.log('== v2.69.0 behavior: a throw mid-undo keeps the batch, and the retry succeeds ==');
+CA.fetchRounds = 0;
+CA.wiBooks = 'gatebook';
+wiStore.set('gatebook', { entries: { '0': { uid: 0, key: ['blade'], keysecondary: [], comment: 'Blade', content: 'iron blade' } } });
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+await driveAsk('<wiedits>[{"book":"gatebook","uid":0,"find":"iron","replace":"steel"}]</wiedits>');
+ok(String(wiStore.get('gatebook').entries['0'].content).includes('steel'), 'sim setup: the worldbook edit applied through the real Apply-all path');
+// An unexpected throw inside the restore: a book whose entries cannot be serialized.
+const circular = { entries: {} };
+circular.entries.self = circular.entries;
+ctx.loadWorldInfo = async () => circular;
+const undoLogBefore = ccLogText().length;
+clickFresh('cc_undo');
+await sleep(400);
+ok(ccLogText().slice(undoLogBefore).some(t => /batch was kept/.test(t)), 'the failed undo said so and kept the batch instead of swallowing it');
+ok(String(wiStore.get('gatebook').entries['0'].content).includes('steel'), 'the failed undo changed nothing');
+ctx.loadWorldInfo = realLoadWI;
+clickFresh('cc_undo');
+await sleep(400);
+ok(String(wiStore.get('gatebook').entries['0'].content).includes('iron'), 'pressing Undo again after the failure restored the pre-apply worldbook');
+ok(!ccLogText().slice(undoLogBefore).some(t => /Nothing to undo/.test(t)), 'the batch was never lost — the retry found it on the stack');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
