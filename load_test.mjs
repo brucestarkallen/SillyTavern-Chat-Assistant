@@ -576,9 +576,9 @@ ok(SRC.includes('plausible causation \\u2014 would a skeptical viewer accept why
 ctx.chatMetadata['continuityCopilot'] = { director: { text: 'E9 sovereignty plan.', episode: 9, concluded: false, ts: 1, msgAt: ctx.chat.length }, directorEp: 9 };
 for (const f of handlers.get('CHAT_CHANGED') || []) await f();
 const wrap = dirSlot();
-ok(wrap.includes('STOP AT THE PLAYER'), 'wrapper orders the storyteller to stop at the player\u2019s decision point');
+ok(wrap.includes('stop at the player'), 'wrapper orders the storyteller to stop at the player\u2019s decision point');
 ok(wrap.includes('unchosen branches never happened'), 'wrapper quarantines unchosen consequence branches from canon');
-ok(wrap.includes('When the EPISODE QUESTION has been answered by the player on screen'), 'wrapper ends the episode on the answered question');
+ok(wrap.includes('answered by the player on screen'), 'wrapper ends the episode on the answered question');
 ok(!wrap.includes('When the LANDING state is fully reached'), 'the old reach-the-landing teleology is gone from the wrapper');
 // (d) Migration mechanics, executed with the real values: the v2.62 default was
 // frozen verbatim, differs from the new default, upgrades when stored, and a
@@ -627,7 +627,7 @@ ok(SRC.includes('STAGED by the world and completed by the player'), 'THE MOMENT 
 // (d) Live wrapper: the storyteller is told slips belong to the player too.
 for (const f of handlers.get('CHAT_CHANGED') || []) await f();
 const wrap64 = dirSlot();
-ok(wrap64.includes('neither are their slips'), 'wrapper: player slips are player events');
+ok(wrap64.includes('so are their slips'), 'wrapper: player slips are player events');
 ok(wrap64.includes('let the player decide what breaks'), 'wrapper: pressure is staged, breakage is played');
 // (e) Migration: v2.63 default frozen verbatim, upgrades, customization untouched.
 const v263M = SRC.match(/const LEGACY_DIRECTOR_PROMPT_V263 = (\[[\s\S]*?\n    \]\.join\('\\n'\));/);
