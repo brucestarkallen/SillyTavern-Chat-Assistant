@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.70.0';
+    const VERSION = '2.71.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -532,6 +532,23 @@
             if (n && n.toLowerCase() !== 'user' && n.toLowerCase() !== 'player') return n + "'s note";
         } catch (_) {}
         return "Author's note";
+    }
+
+    // Numeric settings have THREE distinct states that `Number(x) || fallback`
+    // collapses into one: a real value (INCLUDING 0), an absent/blank field, and
+    // garbage. 0 is legal and meaningful for every numeric setting that declares
+    // min="0" — inject depth 0 (right above the reply), stall timeout 0 (= off),
+    // retries 0 (= off) — so `|| fallback` silently overwrote a deliberate 0.
+    // And a CLEARED box is NOT 0, it is "unset": it must fall back to the
+    // default, never switch a protection off. One helper, used at every read and
+    // every write, so the three states can never be conflated again.
+    function numSetting(raw, fallback, lo, hi) {
+        if (raw === null || raw === undefined) return fallback;
+        const t = (typeof raw === 'string') ? raw.trim() : raw;
+        if (t === '') return fallback;
+        const n = Number(t);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(hi, Math.max(lo, Math.round(n)));
     }
 
     function esc(s) {
@@ -1452,7 +1469,7 @@
 
     function buildContextBlock() {
         const chat = ctx().chat || [];
-        const n = Math.max(0, Math.min(100, Number(settings.recentFull) || 0));
+        const n = numSetting(settings.recentFull, defaults.recentFull, 0, 100);
         const ids = [];
         for (let i = Math.max(0, chat.length - n); i < chat.length; i++) ids.push(i);
         const base = [
@@ -1547,7 +1564,7 @@
     // error) and the abort signal itself (so ⏹ Stop unblocks the await even
     // against backends that ignore AbortSignal and never settle).
     function raceTransport(p, label) {
-        const secs = Math.max(0, Number(settings.llmTimeoutSec ?? 300));
+        const secs = numSetting(settings.llmTimeoutSec, 300, 0, 3600);
         const ac = abortCtl;
         return new Promise((resolve, reject) => {
             let done = false;
@@ -1577,7 +1594,9 @@
     async function callLLM(messages, onPartial, maxTokOverride) {
         const c = ctx();
         const pid = settings.profileId;
-        const maxTok = Math.min(32768, Math.max(256, Number(maxTokOverride) || Number(settings.maxTokens) || 4096));
+        const maxTok = (maxTokOverride !== undefined && maxTokOverride !== null)
+            ? numSetting(maxTokOverride, defaults.maxTokens, 256, 32768)
+            : numSetting(settings.maxTokens, defaults.maxTokens, 256, 32768);
         // A run the user already stopped never opens another request. Every LLM
         // call in the extension funnels through here, so this single refusal
         // covers fetch rounds, think-recovery, auto-continue, and all three
@@ -1878,6 +1897,46 @@
         let n = 0;
         memStrings(t => { n += countOccurrences(t, needle); });
         return n;
+    }
+
+    // One canonical token split for every memory path, so the apply side and the
+    // undo side can never disagree about what a path means.
+    function memPathTokens(path) {
+        const raw = String(path).match(/[^.\[\]]+/g) || [];
+        return raw.map(t => (/^\d+$/.test(t) ? Number(t) : t));
+    }
+
+    // Walk to the CONTAINER that holds the last token. Returns null when the
+    // route no longer exists (a co-extension replaced the object, an array
+    // shrank), so a restore refuses instead of resurrecting a deleted branch.
+    function memPathParent(md, tokens) {
+        if (!md || !Array.isArray(tokens) || !tokens.length) return null;
+        let node = md;
+        for (let i = 0; i < tokens.length - 1; i++) {
+            if (node == null || typeof node !== 'object') return null;
+            node = node[tokens[i]];
+        }
+        if (node == null || typeof node !== 'object') return null;
+        return { parent: node, key: tokens[tokens.length - 1] };
+    }
+
+    // An undo record must have the SAME granularity as the edit that created it.
+    // Backing up the whole ROOT key for a single-field change was wrong twice
+    // over: (a) restoring it would clobber every sibling field written since,
+    // and (b) the drift fingerprint then covered the whole root, so any unrelated
+    // write anywhere under it — including this extension's own receipt line into
+    // its own metadata — refused the undo forever. Backups are node-scoped.
+    function memBackup(keyBackups, md, tokens) {
+        const id = tokens.join('\u0000');
+        if (keyBackups.has(id)) return;
+        const loc = memPathParent(md, tokens);
+        const val = loc ? loc.parent[loc.key] : undefined;
+        keyBackups.set(id, {
+            tokens: tokens.slice(),
+            label: String(tokens[0]),
+            before: (val !== null && typeof val === 'object') ? JSON.parse(JSON.stringify(val)) : val,
+            existed: !!(loc && Object.prototype.hasOwnProperty.call(loc.parent, loc.key)),
+        });
     }
 
     function resolveMemPath(path) {
@@ -2186,16 +2245,17 @@
     // fuzzy-hits two different fields (repetitive ledger text, e.g. two
     // characters' near-identical state fields) must refuse loudly, not
     // first-match into whichever field happens to be enumerated first.
-    function walkFind(node, find, path, out) {
+    function walkFind(node, find, path, out, tokens) {
+        const base = Array.isArray(tokens) ? tokens : [path];
         if (Array.isArray(node)) {
             for (let i = 0; i < node.length; i++) {
                 const v = node[i];
                 if (typeof v === 'string') {
                     const loc = locate(v, find);
                     if (loc && loc.ambiguous) return { ambiguous: true };
-                    if (loc) out.push({ container: node, key: i, val: v, loc: loc, path: path + '[' + i + ']', fuzzy: !!loc.fuzzy });
+                    if (loc) out.push({ container: node, key: i, val: v, loc: loc, path: path + '[' + i + ']', tokens: base.concat([i]), fuzzy: !!loc.fuzzy });
                 } else if (v && typeof v === 'object') {
-                    const r = walkFind(v, find, path + '[' + i + ']', out);
+                    const r = walkFind(v, find, path + '[' + i + ']', out, base.concat([i]));
                     if (r && r.ambiguous) return r;
                 }
             }
@@ -2205,9 +2265,9 @@
             if (typeof v === 'string') {
                 const loc = locate(v, find);
                 if (loc && loc.ambiguous) return { ambiguous: true };
-                if (loc) out.push({ container: node, key: k, val: v, loc: loc, path: path + '.' + k, fuzzy: !!loc.fuzzy });
+                if (loc) out.push({ container: node, key: k, val: v, loc: loc, path: path + '.' + k, tokens: base.concat([k]), fuzzy: !!loc.fuzzy });
             } else if (v && typeof v === 'object') {
-                const r = walkFind(v, find, path + '.' + k, out);
+                const r = walkFind(v, find, path + '.' + k, out, base.concat([k]));
                 if (r && r.ambiguous) return r;
             }
         }
@@ -2304,9 +2364,9 @@
             if (totalExact > 1) return { ok: false, reason: 'anchor matches ' + totalExact + ' places across memory \u2014 give a longer unique excerpt' };
         }
         if (edit.path) {
-            const tokens = String(edit.path).match(/[^.\[\]]+/g) || [];
+            const tokens = memPathTokens(edit.path);
             if (!tokens.length) return { ok: false, reason: 'bad path' };
-            const rootKey = tokens[0];
+            const rootKey = String(tokens[0]);
             const extraOk = rootKey === 'note_prompt' || rootKey === 'cc_critique';
             // The secret directive lives inside our OWN module metadata, which is
             // otherwise closed (the copilot must never rewrite its session history,
@@ -2325,7 +2385,11 @@
                 return { ok: false, reason: 'no directive is active — use \uD83C\uDFAC New/Next to create one before editing it' };
             }
             if (md[rootKey] == null) {
-                if (extraOk && tokens.length === 1) md[rootKey] = '';
+                // Auto-vivifying note_prompt / cc_critique CREATES the key. Record
+                // the backup BEFORE creating it, so `existed:false` is real and the
+                // undo deletes the key instead of leaving an empty string behind
+                // that the user never had.
+                if (extraOk && tokens.length === 1) { memBackup(keyBackups, md, tokens); md[rootKey] = ''; }
                 else return { ok: false, reason: 'path not found' };
             }
             let parent = md;
@@ -2334,23 +2398,22 @@
             for (let t = 1; t < tokens.length; t++) {
                 if (node == null || typeof node !== 'object') return { ok: false, reason: 'path not found' };
                 parent = node;
-                key = /^\d+$/.test(tokens[t]) ? Number(tokens[t]) : tokens[t];
+                key = tokens[t];
                 node = parent[key];
             }
             if (typeof node === 'string') {
-                const backupVal = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
                 if (edit.remove !== undefined) {
                     const target = String(typeof edit.remove === 'object' ? JSON.stringify(edit.remove) : edit.remove).trim();
                     if (!target) return { ok: false, reason: 'remove needs the text to delete' };
                     const loc = locate(node, target);
                     if (loc && loc.ambiguous) return { ok: false, reason: 'text to remove matches multiple places \u2014 give a longer unique excerpt' };
                     if (!loc) return { ok: false, reason: 'text to remove not found in that field' };
-                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                    memBackup(keyBackups, md, tokens);
                     parent[key] = (node.slice(0, loc.start) + node.slice(loc.end)).replace(/\n{3,}/g, '\n\n').trim();
                     return { ok: true, path: edit.path + ' (removed text)', fuzzy: !!loc.fuzzy };
                 }
                 if (edit.append !== undefined) {
-                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                    memBackup(keyBackups, md, tokens);
                     const tail = String(typeof edit.append === 'object' ? JSON.stringify(edit.append) : edit.append);
                     parent[key] = node + (node.replace(/\s+$/, '').length ? '\n\n' : '') + tail;
                     return { ok: true, path: edit.path + ' (appended to field)' };
@@ -2358,20 +2421,19 @@
                 if (edit.find) {
                     const loc = locate(node, edit.find);
                     if (loc && !loc.ambiguous) {
-                        if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                        memBackup(keyBackups, md, tokens);
                         parent[key] = node.slice(0, loc.start) + String(edit.replace ?? '') + node.slice(loc.end);
                         return { ok: true, path: edit.path, fuzzy: !!loc.fuzzy };
                     }
                     // excerpt not uniquely in that exact field \u2014 fall through to the memory-wide search below
                 } else {
                     if (edit.reviewHash && hashText(node) !== edit.reviewHash) return { ok: false, reason: 'field changed since review \u2014 re-run the audit and apply fresh cards' };
-                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, backupVal);
+                    memBackup(keyBackups, md, tokens);
                     parent[key] = String(edit.replace ?? '');
                     return { ok: true, path: edit.path + ' (full replace)', fuzzy: false };
                 }
             } else if (edit.append !== undefined && Array.isArray(node)) {
-                const bkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
-                if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, bkp);
+                memBackup(keyBackups, md, tokens);
                 node.push(edit.append);
                 return { ok: true, path: edit.path + ' (appended 1 item)' };
             } else if (edit.remove !== undefined && Array.isArray(node)) {
@@ -2386,16 +2448,14 @@
                     else if (matches.length > 1) return { ok: false, reason: 'that text matches ' + matches.length + ' list items \u2014 give the exact item text to remove' };
                 }
                 if (ridx < 0) return { ok: false, reason: 'no list item matches that text to remove' };
-                const rbkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
-                if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, rbkp);
+                memBackup(keyBackups, md, tokens);
                 node.splice(ridx, 1);
                 return { ok: true, path: edit.path + ' (removed 1 item)', fuzzy: rfz };
             } else if (!edit.find) {
                 let val = edit.replace;
                 if (typeof val === 'string' && val.trim()) { try { const pj = JSON.parse(val); if (pj && typeof pj === 'object') val = pj; } catch (e) { /* not json */ } }
                 if (val != null && typeof val === 'object') {
-                    const bkp = typeof md[rootKey] === 'object' ? JSON.parse(JSON.stringify(md[rootKey])) : md[rootKey];
-                    if (!keyBackups.has(rootKey)) keyBackups.set(rootKey, bkp);
+                    memBackup(keyBackups, md, tokens);
                     parent[key] = val;
                     return { ok: true, path: edit.path + ' (structural replace)' };
                 }
@@ -2423,12 +2483,12 @@
             if (typeof val === 'string') {
                 const loc = locate(val, edit.find);
                 if (loc && loc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
-                if (loc) cands.push({ rootKey: key, container: null, key: null, val: val, loc: loc, path: key, fuzzy: !!loc.fuzzy });
+                if (loc) cands.push({ rootKey: key, container: null, key: null, val: val, loc: loc, path: key, tokens: [key], fuzzy: !!loc.fuzzy });
                 continue;
             }
             if (typeof val === 'object') {
                 const bucket = [];
-                const r = walkFind(val, edit.find, key, bucket);
+                const r = walkFind(val, edit.find, key, bucket, [key]);
                 if (r && r.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
                 for (const h of bucket) { h.rootKey = key; cands.push(h); }
             }
@@ -2438,7 +2498,7 @@
             if (typeof exVal !== 'string' || !exVal) continue;
             const exLoc = locate(exVal, edit.find);
             if (exLoc && exLoc.ambiguous) return { ok: false, reason: 'anchor ambiguous (multiple similar places) \u2014 give a longer unique excerpt' };
-            if (exLoc) cands.push({ rootKey: exKey, container: null, key: null, val: exVal, loc: exLoc, path: exKey, fuzzy: !!exLoc.fuzzy });
+            if (exLoc) cands.push({ rootKey: exKey, container: null, key: null, val: exVal, loc: exLoc, path: exKey, tokens: [exKey], fuzzy: !!exLoc.fuzzy });
         }
         if (cands.length > 1) {
             const where = cands.slice(0, 4).map(x => x.path).join(', ') + (cands.length > 4 ? ', \u2026' : '');
@@ -2446,8 +2506,7 @@
         }
         if (cands.length === 1) {
             const hit = cands[0];
-            const rootVal = md[hit.rootKey];
-            if (!keyBackups.has(hit.rootKey)) keyBackups.set(hit.rootKey, typeof rootVal === 'object' && rootVal !== null ? JSON.parse(JSON.stringify(rootVal)) : rootVal);
+            memBackup(keyBackups, md, hit.tokens);
             const rep = String(edit.replace ?? '');
             if (hit.container) hit.container[hit.key] = hit.val.slice(0, hit.loc.start) + rep + hit.val.slice(hit.loc.end);
             else md[hit.rootKey] = hit.val.slice(0, hit.loc.start) + rep + hit.val.slice(hit.loc.end);
@@ -2597,7 +2656,17 @@
         // change between apply and undo is refused loudly instead of overwritten.
         let mdNow = null;
         try { mdNow = ctx().chatMetadata || ctx().chat_metadata || null; } catch (e) { /* ignore */ }
-        for (const [key, before] of keyBackups.entries()) items.push({ kind: 'mem', key, before, afterHash: mdNow ? memValueHash(mdNow[key]) : undefined });
+        for (const bk of keyBackups.values()) {
+            // The fingerprint covers exactly the NODE this run wrote, so an
+            // unrelated write elsewhere under the same root key (a co-extension's
+            // ledger rewrite — or this extension's own receipt line into its own
+            // metadata) no longer refuses an undo that is perfectly safe.
+            const locNow = mdNow ? memPathParent(mdNow, bk.tokens) : null;
+            items.push({
+                kind: 'mem', key: bk.label, tokens: bk.tokens, before: bk.before, existed: bk.existed,
+                afterHash: locNow ? memValueHash(locNow.parent[locNow.key]) : undefined,
+            });
+        }
         for (const [book, before] of wiBackups.entries()) {
             const after = wiAfter.get(book);
             items.push({ kind: 'wi', book, before, afterHash: after !== undefined ? hashText(JSON.stringify(after && after.entries ? after.entries : after)) : undefined });
@@ -2661,6 +2730,7 @@
         const changed = [];
         const refused = [];
         let memRestored = false;
+        let wiRestored = 0;
         // Restore in REVERSE apply order: if one batch touched the same message twice
         // (e.g. a bulk replace over a range plus a targeted edit on a message in it),
         // the EARLIEST "before" is the true original, so it must be applied LAST to win.
@@ -2673,15 +2743,28 @@
                 // below. Reading c.chatMetadata fresh here defeated exactly that.
                 const md = chatAt.md || c.chatMetadata || c.chat_metadata;
                 if (!md) { refused.push('memory "' + item.key + '" (no chat metadata)'); continue; }
-                // Drift guard: restore only when the key is still EXACTLY what our
-                // apply left behind. A co-extension (Summaryception rewrites its
-                // ledger every generation) or a later edit must never be clobbered
-                // by a stale whole-key snapshot.
-                if (item.afterHash !== undefined && memValueHash(md[item.key]) !== item.afterHash) {
-                    refused.push('memory "' + item.key + '" changed since the apply (another extension or a later edit) \u2014 not restored');
+                const tokens = Array.isArray(item.tokens) ? item.tokens : [item.key];
+                const label = tokens.join('.');
+                // The route must still exist: a co-extension that replaced the
+                // parent object (or an array that shrank past this index) means the
+                // field we edited is gone. Refuse; never rebuild a deleted branch.
+                const loc = memPathParent(md, tokens);
+                if (!loc) {
+                    refused.push('memory "' + label + '" no longer exists at that path (another extension replaced it) \u2014 not restored');
                     continue;
                 }
-                md[item.key] = item.before; memRestored = true;
+                // Drift guard, NODE-scoped: restore only when this exact field is
+                // still what our apply left behind. Scoping it to the whole root key
+                // meant any unrelated write under that root — including this
+                // extension's own receipt line into its own metadata — refused a
+                // safe undo and blamed "another extension".
+                if (item.afterHash !== undefined && memValueHash(loc.parent[loc.key]) !== item.afterHash) {
+                    refused.push('memory "' + label + '" changed since the apply (another extension or a later edit) \u2014 not restored');
+                    continue;
+                }
+                if (item.existed === false) delete loc.parent[loc.key];
+                else loc.parent[loc.key] = item.before;
+                memRestored = true;
                 continue;
             }
             if (item.kind === 'wi') {
@@ -2701,6 +2784,7 @@
                 } else {
                     await wiSave(item.book, item.before);
                 }
+                wiRestored++;
                 continue;
             }
             const msg = c.chat?.[item.id];
@@ -2747,7 +2831,14 @@
             }
             if (back.length) { stampReviewState(back); renderEditCards(); }
         }
-        const note = 'Undid edits on ' + batch.label + '.' + (returned ? ' ' + returned + ' card(s) returned to pending \u2014 adjust or re-apply.' : '');
+        // The receipt must describe what ACTUALLY happened. Printing "Undid edits
+        // on X" unconditionally meant a fully-refused undo announced success and
+        // then contradicted itself one line later with the skip list \u2014 the user
+        // was told the revert landed while the data sat unchanged.
+        const restoredAny = changed.length + wiRestored + (memRestored ? 1 : 0);
+        const note = restoredAny
+            ? 'Undid edits on ' + batch.label + '.' + (returned ? ' ' + returned + ' card(s) returned to pending \u2014 adjust or re-apply.' : '')
+            : 'Undo restored NOTHING on ' + batch.label + ' \u2014 every target had drifted since the apply (details below). The data is unchanged.';
         addBubble('note', note);
         pushHistory('note', note);
         if (refused.length) {
@@ -2780,8 +2871,7 @@
     }
 
     async function callLLMSmart(messages, onPartial) {
-        const trRaw = Number(settings.thinkRetries);
-        const maxRe = Number.isFinite(trRaw) ? Math.max(0, Math.min(99, trRaw)) : 2;
+        const maxRe = numSetting(settings.thinkRetries, 2, 0, 99);
         let raw = await callLLM(messages, onPartial);
         let sp = splitThinking(raw);
 
@@ -2793,7 +2883,7 @@
         // is mathematically doomed to consume it again \u2014 the recovery pot must
         // be bigger; (b) 'do not reason' cannot switch off a reasoning runtime,
         // so give the forced phase an explicit one-sentence escape hatch.
-        const basePot = Math.min(32768, Math.max(256, Number(settings.maxTokens) || 4096));
+        const basePot = numSetting(settings.maxTokens, defaults.maxTokens, 256, 32768);
         const bigPot = Math.min(32768, Math.max(basePot * 2, basePot + 2048));
         let attempts = 0;
         while (!stopRequested && !sp.rest && sp.think && attempts < maxRe) {
@@ -2869,7 +2959,7 @@
     // ------------------------------------------------------------------
 
     function historyForLLM(uptoIdx) {
-        const depth = Math.max(2, Number(settings.historyDepth) || 12);
+        const depth = numSetting(settings.historyDepth, defaults.historyDepth, 2, 500);
         const base = Number.isInteger(uptoIdx) ? meta().history.slice(0, uptoIdx) : meta().history;
         return base
             .slice(-depth)
@@ -2978,7 +3068,7 @@
 
             let reply = '';
             let think = '';
-            const rounds = Math.max(0, Math.min(6, Number(settings.fetchRounds) || 0));
+            const rounds = numSetting(settings.fetchRounds, defaults.fetchRounds, 0, 6);
             const fetchedIds = new Set();
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
@@ -3010,7 +3100,7 @@
                 // correct edit happens automatically instead of a "not located" failure.
                 if (round < rounds) {
                     const chatLen = (ctx().chat || []).length;
-                    const winStart = Math.max(0, chatLen - Math.max(0, Math.min(100, Number(settings.recentFull) || 0)));
+                    const winStart = Math.max(0, chatLen - numSetting(settings.recentFull, defaults.recentFull, 0, 100));
                     let blind = [];
                     try { blind = blindEditTargets(parseEdits(reply).edits, winStart, fetchedIds); } catch (_) { /* ignore */ }
                     if (blind.length) {
@@ -3280,7 +3370,7 @@
     function applyDirectorInjection() {
         const c = ctx();
         const d = metaRoot().director;
-        const depth = Number(settings?.directorDepth) || 3;
+        const depth = numSetting(settings?.directorDepth, 3, 0, 20);
         const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as the player, not a system injection
         try {
             // Paused = kept in storage, actively CLEARED from the live slot — a
@@ -3296,7 +3386,7 @@
         const c = ctx();
         const md = c.chatMetadata || c.chat_metadata || {};
         const text = typeof md.cc_critique === 'string' ? md.cc_critique.trim() : '';
-        const depth = Number(settings?.critiqueDepth) || 8;
+        const depth = numSetting(settings?.critiqueDepth, 8, 0, 30);
         const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as the player, not a system injection
         try {
             const value = (!settings.critiqueInjectPaused && text)
@@ -4190,12 +4280,11 @@
 
         el('cc_saveset').addEventListener('click', () => {
             settings.profileId = el('cc_profile').value;
-            settings.recentFull = Number(el('cc_recent').value) || 0;
-            settings.fetchRounds = Number(el('cc_rounds').value) || 0;
-            settings.maxTokens = Math.min(32768, Math.max(256, Number(el('cc_maxtok').value) || 4096));
-            settings.llmTimeoutSec = Math.max(0, Math.min(3600, Number(el('cc_llm_timeout').value ?? 300)));
-            const trv = Number(el('cc_think_retries').value);
-            settings.thinkRetries = Number.isFinite(trv) ? Math.max(0, Math.min(99, trv)) : 2;
+            settings.recentFull = numSetting(el('cc_recent').value, defaults.recentFull, 0, 100);
+            settings.fetchRounds = numSetting(el('cc_rounds').value, defaults.fetchRounds, 0, 6);
+            settings.maxTokens = numSetting(el('cc_maxtok').value, defaults.maxTokens, 256, 32768);
+            settings.llmTimeoutSec = numSetting(el('cc_llm_timeout').value, defaults.llmTimeoutSec, 0, 3600);
+            settings.thinkRetries = numSetting(el('cc_think_retries').value, defaults.thinkRetries, 0, 99);
             settings.memoryKeyPattern = el('cc_pattern').value || defaults.memoryKeyPattern;
             settings.allowUserEdits = el('cc_userok').checked;
             settings.includeHidden = el('cc_hidden').checked;
@@ -4204,10 +4293,10 @@
             settings.streaming = el('cc_stream').checked;
             settings.showThinking = el('cc_showthink').checked;
             settings.directorIntensity = el('cc_dir_int').value || 'standard';
-            settings.directorDepth = Number(el('cc_dir_depth').value) || 3;
-            settings.critiqueDepth = Number(el('cc_crit_depth').value) || 8;
+            settings.directorDepth = numSetting(el('cc_dir_depth').value, defaults.directorDepth, 0, 20);
+            settings.critiqueDepth = numSetting(el('cc_crit_depth').value, defaults.critiqueDepth, 0, 30);
             settings.directorAnchors = el('cc_dir_anchors').value;
-            settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
+            settings.critiqueAuto = numSetting(el('cc_crit_auto').value, defaults.critiqueAuto, 0, 100);
             settings.critiqueOnEpisode = el('cc_crit_ep').checked;
             settings.directorTwoPass = el('cc_dir_twopass').checked;
             settings.directorWatcherPass = el('cc_dir_watcher').checked;
@@ -4327,7 +4416,7 @@
         let ans = 0, think = 0, phase = label;
         const render = () => {
             if (!node) return;
-            const secs = Math.max(0, Number(settings.llmTimeoutSec ?? 300));
+            const secs = numSetting(settings.llmTimeoutSec, 300, 0, 3600);
             const gone = Math.floor((Date.now() - t0) / 1000);
             let s = phase + ' \u00b7 ' + gone + 's';
             if (ans || think) s += ' \u00b7 ' + ans + ' chars' + (think ? ' (+' + think + ' thinking)' : '');
@@ -4934,7 +5023,7 @@
 
     function maybeAutoCritique() {
         try {
-            const n = Number(settings.critiqueAuto) || 0;
+            const n = numSetting(settings.critiqueAuto, defaults.critiqueAuto, 0, 100);
             if (n <= 0) return;
             if (settings.critiqueInjectPaused) return; // paused channel: don't count toward a trigger the storyteller cannot receive
             const m = metaRoot();

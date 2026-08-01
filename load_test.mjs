@@ -593,7 +593,7 @@ ok(dirSlot().startsWith("Author's note — my director's plan"), 'ST\'s unset de
 ctx.name1 = 'Player';
 for (const f of handlers.get('CHAT_CHANGED') || []) await f();
 ok(!SRC.includes('Bruce'), 'no player name is hardcoded anywhere in the extension');
-ok((SRC.match(/directorDepth: 3,/g) || []).length === 1 && SRC.includes('Number(settings?.directorDepth) || 3'), 'director steering defaults to depth 3 — between memory reference (4) and beat-level outcome notes (0): reference → plan → outcome → reply');
+ok((SRC.match(/directorDepth: 3,/g) || []).length === 1 && SRC.includes('numSetting(settings?.directorDepth, 3, 0, 20)'), 'director steering defaults to depth 3 — between memory reference (4) and beat-level outcome notes (0): reference → plan → outcome → reply');
 // (d) Migration mechanics, executed with the real values: the v2.62 default was
 // frozen verbatim, differs from the new default, upgrades when stored, and a
 // customized copy is left alone.
@@ -1066,6 +1066,186 @@ clickFresh('cc_undo');
 await sleep(400);
 ok(String(wiStore.get('gatebook').entries['0'].content).includes('iron'), 'pressing Undo again after the failure restored the pre-apply worldbook');
 ok(!ccLogText().slice(undoLogBefore).some(t => /Nothing to undo/.test(t)), 'the batch was never lost — the retry found it on the stack');
+
+
+console.log('== v2.71.0 invariants: one coercion for every numeric setting ==');
+// Root cause of the depth-0 bug: `Number(x) || fallback` collapses three
+// distinct states (a real 0, a blank field, garbage) into one. Prove the helper
+// exists, that it is the ONLY thing reading these settings, and that no
+// falsy-default survives on a field whose UI declares min="0".
+ok(SRC.includes('function numSetting(raw, fallback, lo, hi)'), 'the canonical numeric coercion helper exists');
+const badNumDefaults = (SRC.match(/Number\((?:settings|el\()[^)]*\)[^;\n]*\|\|\s*[1-9]/g) || []);
+ok(badNumDefaults.length === 0, 'no numeric setting is read with a truthy-only fallback any more' + (badNumDefaults.length ? ' — found: ' + badNumDefaults.join(' | ') : ''));
+ok(!SRC.includes(".value ?? 300"), '?? is no longer applied to a DOM .value (which is never null, so it never fired)');
+const numUses = (SRC.match(/numSetting\(/g) || []).length;
+ok(numUses >= 16, 'every numeric read and write routes through the helper (found ' + numUses + ' uses, need >= 16)');
+
+console.log('== v2.71.0 behavior: 0, blank and garbage are three different answers ==');
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.directorMode = 'off';
+CA.critiqueAuto = 0;
+CA.critiqueOnEpisode = false;
+CA.directorInjectPaused = false;
+CA.critiqueInjectPaused = false;
+ctx.chatMetadata['continuityCopilot'] = { director: { text: 'BEATS', episode: 1, concluded: false, ts: 1 }, directorEp: 1 };
+ctx.chatMetadata.cc_critique = 'NORTH STAR: sharpen it.';
+const setNum = (id, v) => { document.getElementById(id).value = v; };
+const saveSettings = () => { clickFresh('cc_saveset'); CA.profileId = 'gate-profile'; };
+
+// (a) A deliberate 0 must survive. Depth 0 = inject directly above the reply;
+// the UI declares min="0", so refusing it was the UI lying to the user.
+setNum('cc_dir_depth', '0'); setNum('cc_crit_depth', '0');
+setNum('cc_llm_timeout', '0'); setNum('cc_think_retries', '0');
+saveSettings();
+ok(CA.directorDepth === 0, 'a typed director depth of 0 is stored as 0 (got ' + JSON.stringify(CA.directorDepth) + ')');
+ok(CA.critiqueDepth === 0, 'a typed critique depth of 0 is stored as 0 (got ' + JSON.stringify(CA.critiqueDepth) + ')');
+ok(CA.llmTimeoutSec === 0, 'a typed stall timeout of 0 is honoured as "off" (got ' + JSON.stringify(CA.llmTimeoutSec) + ')');
+ok(CA.thinkRetries === 0, 'typed retries of 0 is honoured as "off" (got ' + JSON.stringify(CA.thinkRetries) + ')');
+
+// And a stored 0 must reach the actual injection call, not just the settings object.
+const depthSeen = [];
+const realSEP71 = ctx.setExtensionPrompt;
+ctx.setExtensionPrompt = (key, value, pos, depth, scan, role) => { depthSeen.push({ key: String(key), depth }); realSEP71.call(ctx, key, value, pos, depth, scan, role); };
+for (const f of handlers.get('CHAT_CHANGED') || []) f();
+ctx.setExtensionPrompt = realSEP71;
+const dDepth = (depthSeen.find(x => x.key === 'cc_director') || {}).depth;
+const cDepth = (depthSeen.find(x => x.key === 'cc_critique_inject') || {}).depth;
+ok(dDepth === 0, 'the director injection really lands at depth 0 (got ' + JSON.stringify(dDepth) + ')');
+ok(cDepth === 0, 'the editor injection really lands at depth 0 (got ' + JSON.stringify(cDepth) + ')');
+
+// (b) A CLEARED box is "unset", not 0 — it must fall back to the default. The
+// pre-2.71 read turned an empty stall-timeout box into 0, silently switching OFF
+// the watchdog that stops one hung request from wedging every button.
+setNum('cc_dir_depth', ''); setNum('cc_crit_depth', '');
+setNum('cc_llm_timeout', ''); setNum('cc_think_retries', '');
+setNum('cc_recent', ''); setNum('cc_rounds', ''); setNum('cc_maxtok', '');
+saveSettings();
+ok(CA.llmTimeoutSec === 300, 'clearing the stall-timeout box restores the default, it does NOT disable the watchdog (got ' + JSON.stringify(CA.llmTimeoutSec) + ')');
+ok(CA.thinkRetries === 2, 'clearing the retries box restores the default, it does NOT disable auto-recovery (got ' + JSON.stringify(CA.thinkRetries) + ')');
+ok(CA.directorDepth === 3 && CA.critiqueDepth === 8, 'clearing the depth boxes restores their defaults (got ' + CA.directorDepth + '/' + CA.critiqueDepth + ')');
+ok(CA.recentFull === 8 && CA.fetchRounds === 3 && CA.maxTokens === 8192, 'clearing the context boxes restores their defaults (got ' + CA.recentFull + '/' + CA.fetchRounds + '/' + CA.maxTokens + ')');
+
+// (c) Garbage falls back; out-of-range clamps to the UI's declared bounds.
+setNum('cc_dir_depth', 'abc'); setNum('cc_crit_depth', '999'); setNum('cc_maxtok', '99999');
+saveSettings();
+ok(CA.directorDepth === 3, 'garbage in a numeric box falls back to the default (got ' + JSON.stringify(CA.directorDepth) + ')');
+ok(CA.critiqueDepth === 30, 'an over-range value clamps to the UI max (got ' + JSON.stringify(CA.critiqueDepth) + ')');
+ok(CA.maxTokens === 32768, 'an over-range token budget clamps to the provider ceiling (got ' + JSON.stringify(CA.maxTokens) + ')');
+setNum('cc_dir_depth', '3'); setNum('cc_crit_depth', '8'); setNum('cc_maxtok', '8192');
+setNum('cc_llm_timeout', '300'); setNum('cc_think_retries', '2');
+setNum('cc_recent', '8'); setNum('cc_rounds', '3');
+saveSettings();
+
+console.log('== v2.71.0 invariants: an undo record matches the granularity of its edit ==');
+ok(SRC.includes('function memBackup(keyBackups, md, tokens)'), 'memory backups are taken at the NODE, not at the root key');
+ok(SRC.includes('function memPathParent(md, tokens)'), 'undo resolves the node through a shared path walker');
+ok(!/keyBackups\.set\(\s*(?:hit\.)?rootKey/.test(SRC), 'no backup site still snapshots a whole root key');
+ok(SRC.includes('memValueHash(loc.parent[loc.key])'), 'the undo drift fingerprint is NODE-scoped, not root-scoped');
+ok(SRC.includes("refused.push('memory \"' + label + '\" no longer exists at that path"), 'a vanished path is refused, never rebuilt');
+ok(SRC.includes("'Undo restored NOTHING on '"), 'a fully-refused undo says so instead of printing a success line');
+
+console.log('== v2.71.0 behavior: undo restores the field it edited, and only that field ==');
+CA.directorInjectPaused = true;
+CA.critiqueInjectPaused = true;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, mes: 'story reply' });
+
+// (a) The extension's OWN metadata root. loadSettings advertises
+// continuityCopilot.director.text as the editable path, and every apply writes a
+// receipt line into that same root — so a root-scoped fingerprint drifted 100% of
+// the time and the undo could never fire.
+ctx.chatMetadata['continuityCopilot'].director = { text: 'ORIGINAL BEATS', episode: 4, concluded: false, ts: 1 };
+await driveAsk('<memedits>[{"path":"continuityCopilot.director.text","replace":"REWRITTEN BEATS"}]</memedits>');
+ok(ctx.chatMetadata['continuityCopilot'].director.text === 'REWRITTEN BEATS', 'sim setup: the directive edit applied through the real Apply-all path');
+const histBeforeUndo = (ctx.chatMetadata['continuityCopilot'].sessions[0].history || []).length;
+const logAt71 = ccLogText().length;
+clickFresh('cc_undo');
+await sleep(400);
+ok(ctx.chatMetadata['continuityCopilot'].director.text === 'ORIGINAL BEATS', 'undo restored the directive text (got ' + JSON.stringify(ctx.chatMetadata['continuityCopilot'].director.text) + ')');
+ok(!ccLogText().slice(logAt71).some(t => /SKIPPED/.test(t)), 'the undo did not falsely blame drift on our own receipt line');
+ok((ctx.chatMetadata['continuityCopilot'].sessions[0].history || []).length >= histBeforeUndo, 'the undo did NOT roll the session history back — only the edited node was written');
+ok(ctx.chatMetadata['continuityCopilot'].director.episode === 4, 'sibling fields of the edited node survived the undo');
+
+// (b) A co-extension rewriting a DIFFERENT field of the same root must not block
+// an undo of the field we actually edited.
+ctx.chatMetadata.summaryception = { ledger: 'Jillian is at the academy.', threads: 'thread one' };
+await driveAsk('<memedits>[{"path":"summaryception.ledger","find":"at the academy","replace":"on the train"}]</memedits>');
+ok(ctx.chatMetadata.summaryception.ledger.includes('on the train'), 'sim setup: the memory edit applied');
+ctx.chatMetadata.summaryception.threads = 'thread one\nthread two (written by the memory extension after the apply)';
+clickFresh('cc_undo');
+await sleep(400);
+ok(ctx.chatMetadata.summaryception.ledger.includes('at the academy'), 'undo restored the edited field despite a sibling write under the same root');
+ok(ctx.chatMetadata.summaryception.threads.includes('thread two'), 'the co-extension\u2019s sibling write SURVIVED the undo (a root-scoped restore would have eaten it)');
+
+// (c) Drift on the edited field itself is still refused, loudly, with nothing
+// overwritten. Cards a previous undo returned to pending must be cleared first,
+// or Apply-all folds them into this batch and it is no longer fully-refused.
+const dismissPending = () => { const b = document.getElementById('cc_dismissall'); if (b) clickFresh('cc_dismissall'); };
+dismissPending();
+await driveAsk('<memedits>[{"path":"summaryception.ledger","find":"at the academy","replace":"in the infirmary"}]</memedits>');
+ok(ctx.chatMetadata.summaryception.ledger.includes('in the infirmary'), 'sim setup: the second memory edit applied');
+ctx.chatMetadata.summaryception.ledger = 'Jillian is in the infirmary, and someone else edited this line.';
+const logAtDrift = ccLogText().length;
+clickFresh('cc_undo');
+await sleep(400);
+ok(ctx.chatMetadata.summaryception.ledger.includes('someone else edited this line'), 'a drifted field is not overwritten by a stale snapshot');
+const driftLines = ccLogText().slice(logAtDrift);
+ok(driftLines.some(t => /SKIPPED/.test(t) && /summaryception\.ledger/.test(t)), 'the refusal names the exact FIELD, not just the root key');
+ok(driftLines.some(t => /restored NOTHING/.test(t)), 'a fully-refused undo reports that nothing was restored instead of claiming success');
+ok(!driftLines.some(t => /^Undid edits on/.test(t)), 'no contradictory success receipt was printed alongside the refusal');
+
+// (d) A vanished path refuses instead of resurrecting a deleted branch.
+dismissPending();
+ctx.chatMetadata.summaryception = { ledger: 'Jillian is at the academy.' };
+await driveAsk('<memedits>[{"path":"summaryception.ledger","find":"at the academy","replace":"on the train"}]</memedits>');
+ok(ctx.chatMetadata.summaryception.ledger.includes('on the train'), 'sim setup: the third memory edit applied');
+delete ctx.chatMetadata.summaryception;
+const logAtGone = ccLogText().length;
+clickFresh('cc_undo');
+await sleep(400);
+ok(ctx.chatMetadata.summaryception === undefined, 'a root the user deleted is NOT resurrected by an undo');
+ok(ccLogText().slice(logAtGone).some(t => /no longer exists at that path/.test(t)), 'the vanished path is refused by name');
+
+// (e) A MIXED batch — one field restorable, one drifted — reports both truthfully:
+// the success line covers what really landed, the skip list names what did not.
+dismissPending();
+ctx.chatMetadata.summaryception = { ledger: 'Jillian is at the academy.' };
+ctx.chatMetadata['continuityCopilot'].director = { text: 'ORIGINAL BEATS', episode: 9, concluded: false, ts: 1 };
+await driveAsk('<memedits>[{"path":"summaryception.ledger","find":"at the academy","replace":"on the train"},{"path":"continuityCopilot.director.text","replace":"REWRITTEN"}]</memedits>');
+ok(ctx.chatMetadata.summaryception.ledger.includes('on the train') && ctx.chatMetadata['continuityCopilot'].director.text === 'REWRITTEN', 'sim setup: both fields of the mixed batch applied');
+ctx.chatMetadata.summaryception.ledger = 'externally rewritten since the apply';
+const logAtMixed = ccLogText().length;
+clickFresh('cc_undo');
+await sleep(400);
+const mixedLines = ccLogText().slice(logAtMixed);
+ok(ctx.chatMetadata['continuityCopilot'].director.text === 'ORIGINAL BEATS', 'the restorable field of a mixed batch was restored');
+ok(ctx.chatMetadata.summaryception.ledger === 'externally rewritten since the apply', 'the drifted field of a mixed batch was left alone');
+ok(mixedLines.some(t => /^Undid edits on/.test(t)) && mixedLines.some(t => /SKIPPED 1 item/.test(t)), 'a mixed batch reports the restore AND names the one it skipped');
+ok(!mixedLines.some(t => /restored NOTHING/.test(t)), 'a mixed batch does not claim it restored nothing');
+
+// (f) DEEP path via the memory-wide search (no explicit "path"): the token trail
+// walkFind builds must resolve to exactly the container it mutated, or the undo
+// would write to a different node than the apply did.
+dismissPending();
+ctx.chatMetadata.summaryception = { ledger: { chars: [{ name: 'Jillian', state: 'Jillian waits at the academy gate.' }, { name: 'Silas', state: 'Silas trains alone.' }] } };
+await driveAsk('<memedits>[{"find":"waits at the academy gate","replace":"waits at the duel field"}]</memedits>');
+ok(ctx.chatMetadata.summaryception.ledger.chars[0].state.includes('duel field'), 'sim setup: a deeply nested array field was edited via memory-wide search');
+ctx.chatMetadata.summaryception.ledger.chars[1].state = 'Silas trains with the registrar.';   // co-extension writes a SIBLING array element
+clickFresh('cc_undo');
+await sleep(400);
+ok(ctx.chatMetadata.summaryception.ledger.chars[0].state.includes('academy gate'), 'undo restored the exact nested array element it edited');
+ok(ctx.chatMetadata.summaryception.ledger.chars[1].state.includes('registrar'), 'the sibling array element written after the apply survived the undo');
+
+// (g) A key this extension AUTO-CREATED is deleted again by the undo, not left
+// behind as an empty string the user never had.
+dismissPending();
+delete ctx.chatMetadata.note_prompt;
+await driveAsk('<memedits>[{"path":"note_prompt","replace":"Keep the tone dry."}]</memedits>');
+ok(ctx.chatMetadata.note_prompt === 'Keep the tone dry.', 'sim setup: writing to an absent note_prompt created it');
+clickFresh('cc_undo');
+await sleep(400);
+ok(!Object.prototype.hasOwnProperty.call(ctx.chatMetadata, 'note_prompt'), 'undo removed the key the apply created, rather than leaving an empty string behind');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
