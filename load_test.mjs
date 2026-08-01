@@ -580,6 +580,20 @@ ok(wrap.includes('stop at the player'), 'wrapper orders the storyteller to stop 
 ok(wrap.includes('unchosen branches never happened'), 'wrapper quarantines unchosen consequence branches from canon');
 ok(wrap.includes('answered by the player on screen'), 'wrapper ends the episode on the answered question');
 ok(!wrap.includes('When the LANDING state is fully reached'), 'the old reach-the-landing teleology is gone from the wrapper');
+// The injection voice is universal: the mock persona is the role-word 'Player',
+// so the wrapper falls back to the author's note — never a hardcoded name,
+// never the word "user".
+ok(wrap.startsWith("Author's note — my director's plan"), 'role-word persona → the author\'s note, not a role label');
+ctx.name1 = 'Jovan';
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+ok(dirSlot().startsWith("Jovan's note — my director's plan"), 'a named persona speaks as themselves');
+ctx.name1 = 'User';
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+ok(dirSlot().startsWith("Author's note — my director's plan"), 'ST\'s unset default "User" also falls back — the word user never enters the voice');
+ctx.name1 = 'Player';
+for (const f of handlers.get('CHAT_CHANGED') || []) await f();
+ok(!SRC.includes('Bruce'), 'no player name is hardcoded anywhere in the extension');
+ok((SRC.match(/directorDepth: 3,/g) || []).length === 1 && SRC.includes('Number(settings?.directorDepth) || 3'), 'director steering defaults to depth 3 — between memory reference (4) and beat-level outcome notes (0): reference → plan → outcome → reply');
 // (d) Migration mechanics, executed with the real values: the v2.62 default was
 // frozen verbatim, differs from the new default, upgrades when stored, and a
 // customized copy is left alone.

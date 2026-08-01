@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.69.0';
+    const VERSION = '2.70.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -466,7 +466,7 @@
         showThinking: true,
         directorIntensity: 'auto',
         directorAnchors: '',
-        directorDepth: 4,
+        directorDepth: 3,   // steering sits between memory reference (depth 4) and beat-level outcome notes (depth 0): reference → plan → outcome → reply
         directorPrompt: DEFAULT_DIRECTOR_PROMPT,
         critiqueDepth: 8,
         autoRehide: true,
@@ -520,6 +520,18 @@
 
     function ctx() {
         return SillyTavern.getContext();
+    }
+
+    // The injection voice: the note speaks with the player's own persona name,
+    // whoever that is. ST's unset persona defaults ("User"/"Player") are
+    // role-words that read as corpo to a defensive storyteller persona, so
+    // those fall back to the universal fiction convention: the author's note.
+    function noteLabel() {
+        try {
+            const n = String(ctx().name1 || '').trim();
+            if (n && n.toLowerCase() !== 'user' && n.toLowerCase() !== 'player') return n + "'s note";
+        } catch (_) {}
+        return "Author's note";
     }
 
     function esc(s) {
@@ -3268,13 +3280,13 @@
     function applyDirectorInjection() {
         const c = ctx();
         const d = metaRoot().director;
-        const depth = Number(settings?.directorDepth) || 4;
-        const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as Bruce, not a system injection
+        const depth = Number(settings?.directorDepth) || 3;
+        const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as the player, not a system injection
         try {
             // Paused = kept in storage, actively CLEARED from the live slot — a
             // previously set extension prompt persists until overwritten with ''.
             const value = (!settings.directorInjectPaused && d && d.text)
-                ? "Bruce's note — my director's plan for this episode, secret from the player. Use it to give NPCs initiative and shape the episode, always adapting to what the player actually chooses instead of forcing outcomes. If their choices closed off something I planned, adapt it to what they really did — never fabricate player mistakes, evidence, or coincidences to force it through. This note was written before these turns existed — the living story outranks it. The beats below are pressures to introduce, not outcomes to secure: deliver each fully, then stop at the player — their actions, words, decisions, and feelings are theirs to write, and so are their slips: power surfacing, masks cracking, control failing. Stage the pressure, let the player decide what breaks, and let the scene resolve the collision. Where the plan maps consequences per possible answer, wait for the real answer; unchosen branches never happened and must never leak into the story as fact. NPCs act from their own nature and current knowledge, never from this note's needs — if honest NPC behavior or a player choice kills a beat, translate its intent into the new reality or drop it; never retro-tax an earned player victory. Above everything, including this note's own premise: never jump the player character forward in time, place, or situation — reach these beats from the story's current moment, on screen, in causal order. Anything that involves the player (a challenge, a summons, an accusation, an arrival) happens in scene where they can react — never as an established fact they walk in on. If this note describes a scene mid-progress, open it at its beginning and play the connective events. Open scenes in motion; compress only true dead air (sleep, uneventful travel or meals, classes without incident) to a single line the player could interrupt; every reply should advance a beat, reveal something new, or shift a relationship — never idle daily simulation. When the episode's question has been answered by the player on screen and its immediate consequence has landed, the episode is complete — append the exact marker [EPISODE_END] at the very end of your reply. If the player resolves it early or makes the landing impossible, land on the nearest earned consequence instead and still append the marker — an episode must always end; never drag a finished or dead premise onward.\n" + d.text
+                ? noteLabel() + " — my director's plan for this episode, secret from the player. Use it to give NPCs initiative and shape the episode, always adapting to what the player actually chooses instead of forcing outcomes. If their choices closed off something I planned, adapt it to what they really did — never fabricate player mistakes, evidence, or coincidences to force it through. This note was written before these turns existed — the living story outranks it. The beats below are pressures to introduce, not outcomes to secure: deliver each fully, then stop at the player — their actions, words, decisions, and feelings are theirs to write, and so are their slips: power surfacing, masks cracking, control failing. Stage the pressure, let the player decide what breaks, and let the scene resolve the collision. Where the plan maps consequences per possible answer, wait for the real answer; unchosen branches never happened and must never leak into the story as fact. NPCs act from their own nature and current knowledge, never from this note's needs — if honest NPC behavior or a player choice kills a beat, translate its intent into the new reality or drop it; never retro-tax an earned player victory. Above everything, including this note's own premise: never jump the player character forward in time, place, or situation — reach these beats from the story's current moment, on screen, in causal order. Anything that involves the player (a challenge, a summons, an accusation, an arrival) happens in scene where they can react — never as an established fact they walk in on. If this note describes a scene mid-progress, open it at its beginning and play the connective events. Open scenes in motion; compress only true dead air (sleep, uneventful travel or meals, classes without incident) to a single line the player could interrupt; every reply should advance a beat, reveal something new, or shift a relationship — never idle daily simulation. When the episode's question has been answered by the player on screen and its immediate consequence has landed, the episode is complete — append the exact marker [EPISODE_END] at the very end of your reply. If the player resolves it early or makes the landing impossible, land on the nearest earned consequence instead and still append the marker — an episode must always end; never drag a finished or dead premise onward.\n" + d.text
                 : '';
             c.setExtensionPrompt(DIRECTOR_KEY, value, 1, depth, false, role);
         } catch (e) { console.warn(LOG, 'director injection failed', e); }
@@ -3285,10 +3297,10 @@
         const md = c.chatMetadata || c.chat_metadata || {};
         const text = typeof md.cc_critique === 'string' ? md.cc_critique.trim() : '';
         const depth = Number(settings?.critiqueDepth) || 8;
-        const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as Bruce, not a system injection
+        const role = c.extension_prompt_roles?.USER ?? 1; // the note speaks as the player, not a system injection
         try {
             const value = (!settings.critiqueInjectPaused && text)
-                ? "Bruce's note — craft corrections from my editor, keep applying them:\n" + text
+                ? noteLabel() + " — craft corrections from my editor, keep applying them:\n" + text
                 : '';
             c.setExtensionPrompt('cc_critique_inject', value, 1, depth, false, role);
         } catch (e) { console.warn(LOG, 'critique injection failed', e); }
@@ -4192,7 +4204,7 @@
             settings.streaming = el('cc_stream').checked;
             settings.showThinking = el('cc_showthink').checked;
             settings.directorIntensity = el('cc_dir_int').value || 'standard';
-            settings.directorDepth = Number(el('cc_dir_depth').value) || 4;
+            settings.directorDepth = Number(el('cc_dir_depth').value) || 3;
             settings.critiqueDepth = Number(el('cc_crit_depth').value) || 8;
             settings.directorAnchors = el('cc_dir_anchors').value;
             settings.critiqueAuto = Math.max(0, Number(el('cc_crit_auto').value) || 0);
