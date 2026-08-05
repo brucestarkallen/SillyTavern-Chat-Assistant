@@ -1661,6 +1661,94 @@ ok(((ctx.chatMetadata['continuityCopilot'] || {}).audit || {}).cursor > 0, 'the 
 CA.auditMaxCalls = 40;
 CA.auditWindow = 6;
 
+console.log('== v2.75.0: the memory is read as ONE ordered story ==');
+// A memory too large for one call used to be audited section by section with no
+// view of the other sections — so a fact established in snippet 5 and contradicted
+// in snippet 60 was invisible to every pass that ran.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.auditWindow = 6;
+CA.auditMaxCalls = 40;
+ctx.chat.length = 0;
+for (let i = 0; i < 4; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Visible scene ' + i + '.' });
+
+// A memory big enough to need several sections, with entries in story order.
+const entry = (n, from, to) => 'Jillian did the thing numbered ' + n + ' and the consequences ran on for a while afterwards. (covers chat messages #' + from + ' to #' + to + ')';
+const many = [];
+for (let n = 1; n <= 120; n++) many.push(entry(n, (n - 1) * 3, n * 3 - 1));
+ctx.chatMetadata.summary_memory = '--- opening ---\n' + many.join('\n');
+
+const memCalls = [];
+let crossSeen = '';
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        if (all.includes('PASS 3 of 4')) { memCalls.push(all); return 'Entry [7] contradicts entry [98].'; }
+        if (all.includes('PASS 3b')) { crossSeen = all; return 'SECTIONS AGREE'; }
+        return 'WINDOW CLEAN';
+    },
+};
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(2200);
+ok(memCalls.length > 1, 'the memory was large enough to need several sections (' + memCalls.length + ')');
+ok(memCalls.every(c => /\[MEMORY SPINE — every entry in story order/.test(c)), 'EVERY section call carries the spine block — the index of all the entries it is not holding');   // the prompt text alone mentions [MEMORY SPINE], so match the injected block header
+ok(memCalls.every(c => /\[1\] \(#0–#2\)/.test(c) && /\[120\] \(#357–#359\)/.test(c)), 'the spine runs from the first entry to the last, in story order, with coverage ranges');
+ok(/as ONE story/i.test(memCalls[0]) && /chronological order, not a list of independent entries/.test(memCalls[0]), 'the pass is told the memory is one narrative, not a bag of entries');
+ok(/inherits its state/.test(memCalls[0]), 'and that later entries inherit what earlier ones established');
+ok(/FINDINGS SO FAR/.test(memCalls[memCalls.length - 1]), 'what an earlier section found is carried into the later ones');
+ok(crossSeen && /faults that span sections/.test(crossSeen), 'a cross-section pass runs specifically for contradictions BETWEEN distant entries');
+ok(/Entry \[7\] contradicts entry \[98\]/.test(crossSeen), 'the section findings are handed to it so it can join them up');
+
+console.log('== v2.75.0: an entry is never cut in half ==');
+// The old chunker hard-sliced at a character count once a section grew large —
+// the silent-truncation bug of v2.72, hiding in the memory path.
+const longLine = 'X'.repeat(30000) + ' END_OF_ENTRY_MARKER';
+ctx.chatMetadata.summary_memory = '--- big ---\n' + longLine + '\n' + entry(1, 0, 3);
+const chunkCalls = [];
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { const all = messages.map(m => String(m.content || '')).join('\n'); if (all.includes('PASS 3 of 4')) chunkCalls.push(all); return 'MEMORY CONSISTENT'; } };
+dismissPending();
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(2200);
+ok(chunkCalls.some(c => c.includes('X'.repeat(30000) + ' END_OF_ENTRY_MARKER')), 'an over-budget entry is delivered WHOLE rather than sliced at a character count');
+
+console.log('== v2.75.0: ordering faults are proven in code, not guessed ==');
+dismissPending();
+const bad = [
+    entry(1, 0, 5),
+    entry(2, 6, 11),
+    entry(3, 9, 14),      // overlaps #2
+    entry(4, 3, 8),       // jumps backwards
+    entry(5, 40, 45),     // leaves a gap
+    'Jillian rode out again on a long road with nothing much happening. (covers chat messages #60 to #50)',   // backwards
+];
+ctx.chatMetadata.summary_memory = '--- ordering ---\n' + bad.join('\n');
+let orderSeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { const all = messages.map(m => String(m.content || '')).join('\n'); if (all.includes('PASS 3 of 4')) orderSeen = all; return 'MEMORY CONSISTENT'; } };
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(1800);
+ok(/range-overlap/.test(orderSeen), 'overlapping coverage is flagged (the same events recorded twice)');
+ok(/out-of-order/.test(orderSeen), 'an entry covering earlier messages than the one before it is flagged');
+ok(/coverage-gap/.test(orderSeen), 'a span nothing covers is flagged');
+ok(/range-backwards/.test(orderSeen), 'a range that runs backwards is flagged');
+ok(/proven by a code scan of the coverage ranges/.test(orderSeen), 'they reach the model as facts, not as something to re-derive');
+const orderLog = ccLogText().join('\n');
+ok(/Memory order: \d+ provable ordering fault/.test(orderLog), 'and the user is told before any model call');
+
+console.log('== v2.75.0: a healthy memory says so, and one section needs no cross pass ==');
+dismissPending();
+ctx.chatMetadata.summary_memory = '--- clean ---\n' + [entry(1, 0, 3), entry(2, 4, 7), entry(3, 8, 11)].join('\n');
+let crossRan = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { const all = messages.map(m => String(m.content || '')).join('\n'); if (all.includes('PASS 3b')) crossRan++; return all.includes('PASS 3 of 4') ? 'MEMORY CONSISTENT' : 'WINDOW CLEAN'; } };
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(1800);
+ok(crossRan === 0, 'a memory that fits in ONE section needs no cross-section pass and is not charged for one');
+ok(/coverage runs forward, no overlaps or duplicates/.test(ccLogText().join('\n')), 'a clean ordering is reported as a positive result, not silence');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

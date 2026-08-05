@@ -36,6 +36,7 @@ There is no other gate and no partial credit.
 - **Cross-chat contamination:** every LLM flow captures `chatRef()` at entry and checks `sameChat()` before writing anything.
 - **`continuityCopilot` is the storage MODULE id.** Renaming it orphans every user's settings and per-chat data.
 - **The deep audit sweeps VISIBLE messages only.** A ghosted message is already represented by a memory snippet; sweeping it linearly audits the same events twice and is what made a full run take an hour. Ghosted originals are pulled only where a pass states a doubt (`<verify>`), and a call budget pauses the run at a saved cursor rather than letting it run unbounded.
+- **The memory is one ordered story, not a bag of entries.** Any pass that chunks it must ship `memorySpine()` with every chunk (or a contradiction between distant entries is unseeable), carry findings forward, and run the cross-section pass when there is more than one chunk. Chunk boundaries never fall inside an entry — the old character-count slice was the v2.72 truncation bug hiding in the memory path.
 - **Chat-scoped state, not global.** Director, hidden ledger, session history, and the deep-audit resume cursor all live in `chatMetadata.continuityCopilot`.
 - **Undo is refusal-first and node-scoped**: backups and drift fingerprints are taken at the edited node, never at the root key.
 - **Model-agnostic:** never hardcode a model identity or design around one model's quirks.

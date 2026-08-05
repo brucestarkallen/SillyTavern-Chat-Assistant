@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.74.0';
+    const VERSION = '2.75.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -137,7 +137,7 @@
     const BRIEF_SHORTCUT = '#br = Write a short handoff paragraph for a fresh storyteller: where the story stands and what is in motion. Prose only, no edits.';
     const OPTIMIZE_SHORTCUT = '#opt = MEMORY OPTIMIZE \u2014 zero-loss token reduction of the memory, section by section (aggregation, reference stripping, dialogue-surround and texture compression, causal notation), with a mandatory zero-loss verification before anything is proposed. Never touches the notepad or a pinned quote. Nothing changes until you press Apply.';
     const CLEANUP_SHORTCUT = '#cl = MEMORY CLEANUP \u2014 the showrunner pass for a cluttered story: throughline, cold-read test, broken coherence, what is missing, motivation check, then a SPINE / SUPPORT / TEXTURE / NOISE manifest. Subtractive proposals only; restructuring is described and waits for your go-ahead.';
-    const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself; (4) VERIFY \u2014 pulls the ORIGINAL ghosted messages, but only the ones pass 3 could not settle on its own. Only VISIBLE messages are swept \u2014 ghosted ones are already in the memory, and their originals are fetched only where something looks wrong. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point), "#m ghosted" (also repair broken blocks inside ghosted messages). It resumes where a stopped run left off.';
+    const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself as ONE ordered story \u2014 every entry indexed in story order and read against the rest, with a cross-section pass for contradictions that live between two distant entries, plus a code scan of the coverage ranges for backwards, overlapping, duplicated or missing spans; (4) VERIFY \u2014 pulls the ORIGINAL ghosted messages, but only the ones pass 3 could not settle on its own. Only VISIBLE messages are swept \u2014 ghosted ones are already in the memory, and their originals are fetched only where something looks wrong. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point), "#m ghosted" (also repair broken blocks inside ghosted messages). It resumes where a stopped run left off.';
     const LEGACY_M_SHORTCUT = '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.';
     const PSYCH_SHORTCUT = '#p = Analyze the psychology of the character I name (or the most active one if none is named). Use only [STORY MEMORY] and the chat. Cover: (1) core drives, fears, and formative wounds as established in canon; (2) internal contradictions in how the character is written; (3) consistency: does recent behavior match the established characterization? Flag any out-of-character drift, citing the specific turns; (4) what the character would plausibly do next under the current pressure, and what would ring false. Ground every claim in something concrete. Do not propose edits unless I ask.';
     const DEFAULT_SHORTCUTS = [
@@ -200,7 +200,9 @@
     ].join('\n');
 
     const AUDIT_MEMORY_PROMPT = [
-        'DEEP AUDIT \u2014 PASS 3 of 4: THE MEMORY AGAINST ITSELF.',
+        'DEEP AUDIT \u2014 PASS 3 of 4: THE MEMORY AGAINST ITSELF, AS ONE STORY.',
+        'The memory is a single narrative in chronological order, not a list of independent entries. [MEMORY SPINE] indexes EVERY entry in that order, numbered, with the message range each one covers \u2014 including the entries not in the section you are holding. Read the section against the spine: an entry only makes sense against everything that came BEFORE it, and everything after it inherits its state.',
+        'So check the story, not the sentence: does the timeline run forward; does a state change (a wound, a promise, a death, a journey, a title, a possession) persist until something later changes it; does a character\'s knowledge only ever grow through a recorded event; does an entry contradict one from a different part of the memory \u2014 name that entry by its spine number when it does.',
         'Cross-check [STORY MEMORY] against itself: snippet vs snippet, snippet vs its own detail/audit field, ledger dossier vs the snippets, and dossier vs dossier. Find real contradictions (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, epistemic leaks, and editorial contamination in CORE.',
         'The NOTEPAD is the exception: it records the OPENING state on purpose. Later events outgrowing it is progression, not a contradiction — do not "update", "refresh" or reconcile it, and do not report it. Touch it only for a contradiction internal to the notepad itself.',
         'Where two versions disagree, <fetch> the original messages to decide which is true before proposing anything.',
@@ -208,6 +210,15 @@
         'Then, SEPARATELY, list every message you would need to READ to settle a doubt you could not resolve from the memory alone \u2014 a snippet that looks wrong, thin, self-contradicting, or that records something the ledger denies. Use the snippet\'s own "(covers chat messages #x to #y)" note to name them:',
         '<verify>[41, "58-63"]</verify>',
         'Name ONLY what you actually doubt. An empty list is the right answer for a memory that checks out \u2014 those originals are ghosted, and pulling them costs the user real time.',
+    ].join('\n');
+
+    const AUDIT_CROSS_PROMPT = [
+        'DEEP AUDIT — PASS 3b: THE WHOLE MEMORY AT ONCE.',
+        'The memory was too large to hold in one piece, so it was audited in sections. A contradiction BETWEEN two sections cannot be seen from inside either one — that is what this pass is for.',
+        'You are given [MEMORY SPINE] (every entry, in story order, numbered, with coverage ranges), the deterministic [ORDER FLAGS], and [FINDINGS SO FAR] from the section passes.',
+        'Look ONLY for faults that span sections: a fact established early and contradicted late; a state change that silently reverts; knowledge a character has in one section with no recorded event granting it before that point; a thread opened and answered inconsistently; the same event recorded twice in different places with different details; entries out of story order.',
+        'Do not re-report anything already in [FINDINGS SO FAR]. Name the spine numbers of BOTH entries in every finding.',
+        'The spine lines are 90-character extracts, not the entries. Never propose a <memedits> "find" from a spine line — request the entries whose full text you need with <verify>[12, "58-63"] (the numbers in a spine line\'s parentheses are the CHAT message ids that entry covers), and the originals will be pulled in the next pass. If nothing spans sections, say exactly: SECTIONS AGREE.',
     ].join('\n');
 
     const AUDIT_VERIFY_PROMPT = [
@@ -3790,21 +3801,98 @@
         return reply;
     }
 
-    // Split a long memory blob on its own section headers, then pack sections into
-    // budgeted chunks. Deterministic: the same memory always chunks the same way.
+    // The memory is ONE story in chronological order, not a bag of independent
+    // entries. Three things follow from that, and all three are load-bearing:
+    //
+    //   1. A chunk boundary must never fall inside an entry. The old version hard-
+    //      sliced at a character count once a section exceeded twice the budget,
+    //      cutting a snippet in half with no marker \u2014 the same silent-truncation
+    //      bug the v2.72 pack existed to kill, hiding in the memory path.
+    //   2. Every chunk must know what the OTHER chunks contain, or a contradiction
+    //      between snippet 5 and snippet 60 is invisible to a reader holding only
+    //      one of them. That is what the spine is for: an ordered one-line index of
+    //      the entire memory, shipped with every chunk.
+    //   3. What one chunk established must reach the next. That is the carry.
     function chunkMemory(text, budget) {
         const t = String(text || '');
         if (!t.trim()) return [];
-        const parts = t.split(/\n(?=--- (?:memory|injection|Author's Note)[^\n]*---)/);
+        const lines = t.split('\n');
         const out = [];
-        let cur = '';
-        for (const p of parts) {
-            if (cur && (cur.length + p.length) > budget) { out.push(cur); cur = p; }
-            else cur = cur ? (cur + '\n' + p) : p;
-            while (cur.length > budget * 2) { out.push(cur.slice(0, budget * 2)); cur = cur.slice(budget * 2); }
+        let cur = [];
+        let curLen = 0;
+        for (const line of lines) {
+            const isHeader = /^---\s.*---\s*$/.test(line);
+            // A section header starts a new chunk when the current one is already
+            // substantial, so sections stay whole wherever they fit.
+            if (isHeader && curLen > budget * 0.6 && cur.length) {
+                out.push(cur.join('\n')); cur = []; curLen = 0;
+            } else if (curLen && (curLen + line.length + 1) > budget) {
+                out.push(cur.join('\n')); cur = []; curLen = 0;
+            }
+            cur.push(line);
+            curLen += line.length + 1;
         }
-        if (cur.trim()) out.push(cur);
+        if (cur.join('\n').trim()) out.push(cur.join('\n'));
         return out;
+    }
+
+    // One line per substantive entry, in story order, with its coverage range when
+    // the memory records one. This is what lets a pass reason about an entry it is
+    // not currently holding.
+    const SPINE_MAX_LINES = 600;
+    const COVER_RE = /covers?\s+(?:chat\s+)?(?:messages?|turns?)\s*#?(\d+)\s*(?:to|through|[-\u2013\u2014])\s*#?(\d+)/i;
+
+    function memorySpine(text) {
+        const lines = String(text || '').split('\n');
+        const rows = [];
+        let n = 0;
+        for (const line of lines) {
+            const raw = line.trim();
+            if (!raw) continue;
+            if (/^---\s.*---$/.test(raw)) { rows.push('## ' + raw.replace(/^---\s*/, '').replace(/\s*---$/, '')); continue; }
+            if (raw.length < 30) continue;   // headings, labels and stubs are not entries
+            n++;
+            const cov = raw.match(COVER_RE);
+            rows.push('[' + n + ']' + (cov ? ' (#' + cov[1] + '\u2013#' + cov[2] + ')' : '') + ' ' + clip(raw, 90));
+        }
+        if (rows.length > SPINE_MAX_LINES) {
+            const head = rows.slice(0, Math.floor(SPINE_MAX_LINES / 2));
+            const tail = rows.slice(-Math.floor(SPINE_MAX_LINES / 2));
+            const cut = rows.length - head.length - tail.length;
+            return head.join('\n') + '\n[\u26A0 ' + cut + ' index line(s) omitted here to fit \u2014 this index is INCOMPLETE in the middle; ask for those entries by number if a gap matters]\n' + tail.join('\n');
+        }
+        return rows.join('\n');
+    }
+
+    // Provable ordering faults in the memory's own coverage notes. Deterministic,
+    // no model: a range that runs backwards, repeats, overlaps its predecessor or
+    // jumps behind it is an ordering error whatever the prose says.
+    function scanMemoryOrder(text) {
+        const found = [];
+        let n = 0;
+        for (const line of String(text || '').split('\n')) {
+            const raw = line.trim();
+            if (!raw) continue;
+            if (raw.length >= 30 && !/^---\s.*---$/.test(raw)) n++;
+            const m = raw.match(COVER_RE);
+            if (m) found.push({ entry: n, from: Number(m[1]), to: Number(m[2]), text: clip(raw, 80) });
+        }
+        const out = [];
+        for (let i = 0; i < found.length; i++) {
+            const r = found[i];
+            if (r.from > r.to) out.push({ code: 'range-backwards', detail: 'entry [' + r.entry + '] covers #' + r.from + ' to #' + r.to + ' \u2014 the range runs backwards', excerpt: r.text });
+            if (i === 0) continue;
+            const p = found[i - 1];
+            if (r.from === p.from && r.to === p.to) out.push({ code: 'range-duplicate', detail: 'entries [' + p.entry + '] and [' + r.entry + '] both cover #' + r.from + '\u2013#' + r.to + ' \u2014 the same span is recorded twice', excerpt: r.text });
+            else if (r.from < p.from) out.push({ code: 'out-of-order', detail: 'entry [' + r.entry + '] (#' + r.from + '\u2013#' + r.to + ') sits after entry [' + p.entry + '] (#' + p.from + '\u2013#' + p.to + ') but covers EARLIER messages \u2014 the memory is out of story order here', excerpt: r.text });
+            else if (r.from <= p.to) out.push({ code: 'range-overlap', detail: 'entry [' + r.entry + '] starts at #' + r.from + ' but entry [' + p.entry + '] already ran to #' + p.to + ' \u2014 overlapping coverage, so the same events are recorded twice', excerpt: r.text });
+            else if (r.from > p.to + 1) out.push({ code: 'coverage-gap', detail: 'nothing covers #' + (p.to + 1) + '\u2013#' + (r.from - 1) + ' between entries [' + p.entry + '] and [' + r.entry + '] \u2014 possibly summarized elsewhere, possibly lost', excerpt: r.text });
+        }
+        return out;
+    }
+
+    function formatMemoryFlags(rows) {
+        return rows.map(f => '- [' + f.code + '] ' + f.detail + (f.excerpt ? '\n    entry: \u201C' + f.excerpt + '\u201D' : '')).join('\n');
     }
 
     async function runDeepAudit(rawExtra) {
@@ -3922,19 +4010,31 @@
                 if (st.cursor > (visible.length ? visible[visible.length - 1] : 0)) { st.cursor = 0; saveMeta(); }
             }
 
-            // ---------------- PASS 3: memory against itself ----------------------------
+            // ---------------- PASS 3: memory against itself, as one story --------------
             if (!structureOnly && alive()) {
                 const memText = gatherMemory();
                 const chunks = chunkMemory(memText, 24000);
                 if (!chunks.length) {
                     note('Memory pass skipped \u2014 no memory-extension data is visible in this chat.');
                 } else {
+                    const spine = memorySpine(memText);
+                    const orderFlags = scanMemoryOrder(memText);
+                    if (orderFlags.length) {
+                        note('\uD83E\uDDED Memory order: ' + orderFlags.length + ' provable ordering fault(s) \u2014 ' + [...new Set(orderFlags.map(f => f.code))].join(', '));
+                        report.push('MEMORY ORDER:\n' + formatMemoryFlags(orderFlags));
+                    } else {
+                        note('\uD83E\uDDED Memory order: coverage runs forward, no overlaps or duplicates.');
+                    }
+                    const carry = [];   // what each section established, handed to the next
                     for (let k = 0; k < chunks.length; k++) {
                         if (!alive() || overBudget()) break;
                         tick.phase('deep audit \u00b7 memory ' + (k + 1) + '/' + chunks.length);
                         const reply = await auditAsk([
                             sysPrompt(),
                             AUDITOR_DOCTRINE,
+                            '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS]\n' + spine,
+                            orderFlags.length ? '[ORDER FLAGS \u2014 proven by a code scan of the coverage ranges]\n' + formatMemoryFlags(orderFlags) : '',
+                            carry.length ? '[FINDINGS SO FAR \u2014 from earlier sections; do not re-report]\n' + carry.join('\n').slice(0, 6000) : '',
                             '[STORY MEMORY' + (chunks.length > 1 ? ' \u2014 section ' + (k + 1) + ' of ' + chunks.length : '') + ']\n' + chunks[k],
                         ], AUDIT_MEMORY_PROMPT + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
                         calls++;
@@ -3942,7 +4042,30 @@
                         ingestProposals(reply);
                         for (const id of parseVerify(reply)) doubts.add(id);
                         const prose = stripBlocks(reply).trim();
-                        if (prose && !/^MEMORY CONSISTENT\.?$/i.test(prose)) report.push('MEMORY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+                        if (prose && !/^MEMORY CONSISTENT\.?$/i.test(prose)) {
+                            report.push('MEMORY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+                            carry.push('section ' + (k + 1) + ': ' + clip(prose, 700));
+                        }
+                    }
+
+                    // 3b: the faults that live BETWEEN sections and cannot be seen
+                    // from inside any one of them.
+                    if (chunks.length > 1 && alive() && !overBudget()) {
+                        tick.phase('deep audit \u00b7 cross-section');
+                        const reply = await auditAsk([
+                            sysPrompt(),
+                            AUDITOR_DOCTRINE,
+                            '[MEMORY SPINE \u2014 every entry in story order]\n' + spine,
+                            orderFlags.length ? '[ORDER FLAGS]\n' + formatMemoryFlags(orderFlags) : '',
+                            carry.length ? '[FINDINGS SO FAR]\n' + carry.join('\n').slice(0, 8000) : '(no section raised a finding)',
+                        ], AUDIT_CROSS_PROMPT + extraLine, 0, tick);
+                        calls++;
+                        if (alive()) {
+                            ingestProposals(reply);
+                            for (const id of parseVerify(reply)) doubts.add(id);
+                            const prose = stripBlocks(reply).trim();
+                            if (prose && !/^SECTIONS AGREE\.?$/i.test(prose)) report.push('CROSS-SECTION:\n' + prose);
+                        }
                     }
                 }
             }
@@ -4039,6 +4162,7 @@
                     sysPrompt(),
                     AUDITOR_DOCTRINE,
                     '[MESSAGE INDEX]\n' + buildIndex(),
+                    chunks.length > 1 ? '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS]\n' + memorySpine(memText) : '',
                     '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
                 ], prompt + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
                 if (!sameChat(chatAt)) break;
