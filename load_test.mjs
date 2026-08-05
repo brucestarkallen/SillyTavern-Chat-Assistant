@@ -990,7 +990,7 @@ console.log('== v2.69.0 invariants: the stop flag belongs to the RUN, not to one
 // the user had already cancelled.
 ok(/function beginRun\(\) \{\n        running = true;\n        stopRequested = false;\n        setBusy\(true\);\n    \}/.test(SRC), 'beginRun() is the one place a run starts: takes the lock AND clears the stop flag');
 ok((SRC.match(/\n        running = true;/g) || []).length === 1, 'the lock is taken in exactly one place (beginRun), nowhere else');
-ok((SRC.match(/\n        beginRun\(\);/g) || []).length === 7, 'all 7 run entrypoints route through beginRun (found ' + (SRC.match(/\n        beginRun\(\);/g) || []).length + ', need 7)');
+ok((SRC.match(/\n        beginRun\(\);/g) || []).length === 8, 'all 8 run entrypoints route through beginRun (found ' + (SRC.match(/\n        beginRun\(\);/g) || []).length + ', need 8)');   // +1 in v2.72: runDeepAudit
 ok(!/const maxTok = [^\n]*\n        stopRequested = false;/.test(SRC), 'callLLM no longer clears the stop flag');
 ok(/if \(stopRequested\) return '';\n        try \{ abortCtl = new AbortController/.test(SRC), 'callLLM refuses to open a request when the run is already stopped');
 
@@ -1246,6 +1246,252 @@ ok(ctx.chatMetadata.note_prompt === 'Keep the tone dry.', 'sim setup: writing to
 clickFresh('cc_undo');
 await sleep(400);
 ok(!Object.prototype.hasOwnProperty.call(ctx.chatMetadata, 'note_prompt'), 'undo removed the key the apply created, rather than leaving an empty string behind');
+
+console.log('== v2.72.0: a message is served WHOLE, or it says it was not ==');
+// Regression this pack exists for: fullTextOf did `.slice(0, 8000)` with NO marker.
+// Every long scene reached the model as a mid-word stump LABELLED as its full text,
+// so the model reasoned about where the message ENDED from a boundary the tool
+// invented — and each edit moved that boundary and "revealed" more shrapnel.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.fullTextCap = 0;
+CA.recentFull = 1;
+
+const BIG_TAIL = 'THE_REAL_ENDING_MARKER</details>';
+const bigMes = 'A'.repeat(20000) + BIG_TAIL;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'Narrator', mes: bigMes });
+
+let captured = [];
+const capture = (reply) => ({ sendRequest: async (pid, messages) => { captured.push(messages.map(m => String(m.content || '')).join('\n')); return reply; } });
+
+captured = [];
+ctx.ConnectionManagerRequestService = capture('nothing to fix');
+document.getElementById('cc_input').value = 'read it';
+clickFresh('cc_send');
+await sleep(350);
+const ctxSent = captured.join('\n');
+ok(ctxSent.includes(BIG_TAIL), 'a 20k-char message reaches the model with its REAL ending intact (the 8000-char silent clip is gone)');
+ok(ctxSent.includes('--- #0 [Narrator] \u2014 ' + bigMes.length + ' chars, COMPLETE'), 'the header states the exact character count (' + bigMes.length + ') and the verdict COMPLETE');
+ok(ctxSent.includes('COMPLETE means COMPLETE'), 'the non-editable message-text contract ships with every request');
+
+// With a cap deliberately set, the text is served in PARTS with a loud banner —
+// never as a silent stump. The banner must forbid structural conclusions.
+CA.fullTextCap = 5000;
+captured = [];
+ctx.ConnectionManagerRequestService = capture('ok');
+document.getElementById('cc_input').value = 'read it again';
+clickFresh('cc_send');
+await sleep(350);
+const capped = captured.join('\n');
+ok(capped.includes('PART 1 OF ' + Math.ceil(bigMes.length / 5000) + ' (chars 1\u20135000 of ' + bigMes.length + '), INCOMPLETE'), 'an over-cap message is served as a numbered PART with exact character bounds');
+ok(/CUT \u2014 NOT the whole message/.test(capped) && capped.includes(String(bigMes.length - 5000) + ' follow it'), 'the cut banner states how many characters are still missing (' + (bigMes.length - 5000) + ')');
+ok(!capped.includes(BIG_TAIL), 'sim setup: part 1 genuinely does not contain the tail');
+ok(/<fetch>\["0#2"\]<\/fetch>/.test(capped), 'the banner hands the model the exact ref for the next part');
+
+// And the part ref actually resolves: asking for 0#5 serves the LAST slice.
+captured = [];
+let turn = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { captured.push(messages.map(m => String(m.content || '')).join('\n')); return (turn++ === 0) ? '<fetch>["0#5"]</fetch>' : 'done'; } };
+document.getElementById('cc_input').value = 'get the end';
+clickFresh('cc_send');
+await sleep(500);
+ok(captured.join('\n').includes(BIG_TAIL), 'a part fetch ("0#5") serves the final slice, so the true ending is reachable under a cap');
+CA.fullTextCap = 0;
+
+console.log('== v2.72.0: a short serve is never silent ==');
+// parseFetch used to `.slice(0, 15)` the requested ids: the model asked for 20,
+// got 15, and was never told which 5 it had not seen — the same lie in a new place.
+ctx.chat.length = 0;
+for (let i = 0; i < 40; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'scene ' + i });
+captured = [];
+turn = 0;
+const wanted = JSON.stringify(Array.from({ length: 35 }, (_, i) => i));
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { captured.push(messages.map(m => String(m.content || '')).join('\n')); return (turn++ === 0) ? ('<fetch>' + wanted + '</fetch>') : 'done'; } };
+document.getElementById('cc_input').value = 'read a lot';
+clickFresh('cc_send');
+await sleep(500);
+const served = captured.join('\n');
+ok(/id\(s\) in that request were NOT served/.test(served), 'over-cap fetch ids are reported back instead of silently dropped');
+ok(/Not served: #30, #31, #32, #33, #34/.test(served), 'the unserved ids are named exactly');
+
+console.log('== v2.72.0: the structure scanner proves what a reader was guessing ==');
+// The literal shape that cost an evening: turn 217 carrying turn 215's Plot
+// Momentum block as well as its own, plus a severed fragment welded to the tag.
+const BROKEN = [
+    '<details>', '<summary>Plot Momentum</summary>',
+    '- NPC Agenda: Cersei seals the secret and binds him to her wholly, whatever it costs her.',
+    '- Physics: the queen\u2019s chambers, rain on the glass, a guard posted outside the door.',
+    '- Scene Pacing: Slow Burn', '</details>',
+    '<details>', '<summary>Plot Momentum</summary>',
+    '- NPC Agenda: Cersei seals the secret and binds him to her wholly, whatever it costs her.',
+    '- Physics: the queen\u2019s chambers, rain on the glass, a guard posted outside the door.',
+    '- Scene Pacing: Aftermath', '</details>s him in the afterglow, extracting promises.',
+].join('\n');
+const CLEAN = [
+    '<details>', '<summary>Plot Momentum</summary>',
+    '- NPC Agenda: Tywin sends ravens before the names leak, and counts the cost of each one.',
+    '- Physics: the Tower of the Hand at dusk, a scribe waiting, the city loud below the window.',
+    '- Scene Pacing: Aftermath', '</details>',
+].join('\n');
+
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'prose only, no machine blocks at all.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: CLEAN });
+ctx.chat.push({ is_user: false, name: 'N', mes: BROKEN });
+
+captured = [];
+ctx.ConnectionManagerRequestService = capture('WINDOW CLEAN');
+document.getElementById('cc_input').value = '#m structure';
+clickFresh('cc_send');
+await sleep(700);
+const flags = captured.join('\n');
+const scanLog = ccLogText().join('\n');
+ok(/duplicate-block/.test(flags) && /share the summary label "Plot Momentum"/.test(flags), 'the scanner names the DUPLICATED block by its summary label — the "double details"');
+ok(/tail-after-block/.test(flags) && /welded directly onto the final <\/details>/.test(flags), 'the scanner names the fragment welded onto the closing tag');
+ok(/#2 \[N\]/.test(flags) && !/#1 \[N\]/.test(flags), 'only the broken message is flagged — the clean one and the prose-only one are not');
+ok(/STRUCTURE FLAGS — proven by a code scan/.test(flags), 'the flags reach the model as facts, not as something to re-derive');
+ok(/Structure: 1 message\(s\) carry provable faults/.test(scanLog), 'the user is told which messages are broken before any model call');
+
+console.log('== v2.72.0: deep audit runs every pass and resumes ==');
+dismissPending();
+ctx.chat.length = 0;
+for (let i = 0; i < 12; i++) ctx.chat.push({ is_user: i % 2 === 1, name: 'N', mes: 'Scene ' + i + ': the road was iron.' });
+ctx.chatMetadata.summary_memory = 'Jillian is at the academy. (covers chat messages #0 to #3)';
+CA.auditWindow = 4;
+CA.auditFetchRounds = 0;
+
+const passes = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        if (all.includes('PASS 1 of 4')) { passes.push('structure'); return 'fixed'; }
+        if (all.includes('PASS 2 of 4')) { passes.push('continuity'); return 'Scene 3 contradicts the memory.\n<edits>[{"id":3,"find":"iron","replace":"steel"}]</edits>'; }
+        if (all.includes('PASS 3 of 4')) { passes.push('memory'); return 'MEMORY CONSISTENT'; }
+        if (all.includes('PASS 4 of 4')) { passes.push('fidelity'); return 'SECTION FAITHFUL'; }
+        passes.push('other'); return 'x';
+    },
+};
+document.getElementById('cc_input').value = '#m';
+clickFresh('cc_send');
+await sleep(1400);
+ok(passes.filter(p => p === 'continuity').length === 3, 'the continuity pass walked the WHOLE 12-message log in 4-message windows (got ' + passes.filter(p => p === 'continuity').length + ')');
+ok(passes.includes('memory') && passes.includes('fidelity'), 'the memory and fidelity passes both ran without being asked separately');
+ok(!passes.includes('other'), 'every audit call carried one of the four pass contracts');
+const auditLog = ccLogText().join('\n');
+ok(/Deep audit complete/.test(auditLog), 'the audit ends with a consolidated verdict');
+ok((document.getElementById('cc_cards') ? true : true) && ccLogText().join('\n').includes('CONTINUITY'), 'window findings are reported in the transcript');
+
+console.log('== v2.72.0: routing, contract and stored-default migrations ==');
+ok(/^#m\b/.test('#m from 180') && !/^#m\b/.test('#memory audit'), 'the #m route cannot swallow a longer tag like #memory');
+CA.systemPrompt = 'MY OWN CUSTOM PROMPT. USER_EDIT_RULE';
+captured = [];
+ctx.ConnectionManagerRequestService = capture('ok');
+document.getElementById('cc_input').value = 'hello';
+clickFresh('cc_send');
+await sleep(350);
+ok(captured.join('\n').includes('COMPLETE means COMPLETE'), 'the completeness contract survives a fully CUSTOMIZED system prompt (it lives outside the editable one)');
+CA.systemPrompt = SRC.match(/const LEGACY_SYSTEM_PROMPT_V271 = /) ? CA.systemPrompt : CA.systemPrompt;
+ok(SRC.includes('const LEGACY_SYSTEM_PROMPT_V271 = DEFAULT_SYSTEM_PROMPT'), 'a stored 2.71 system prompt has a legacy witness to upgrade from');
+ok(SRC.includes('settings.shortcuts.includes(LEGACY_M_SHORTCUT)'), 'a stored copy of the old #m shortcut line is upgraded to the deep-audit description');
+ok(SRC.includes("if (msgServedWhole(r.id)) fetchedIds.add(r.id);"), 'only a WHOLE serve marks a message as read for the blind-edit guard');
+
+console.log('== v2.72.0: block SHAPE drift is caught across scenes ==');
+// "Compare it with the previous scene's format" — done in code. A field silently
+// missing from one scene's block is what breaks a display regex, and it is
+// invisible to anyone skimming prose.
+dismissPending();
+const shaped = (pacing, extra) => ['<details>', '<summary>Plot Momentum</summary>',
+    '- NPC Agenda: the queen presses her advantage while the council is still arguing.',
+    '- Physics: the small council chamber, rain on the shutters, a guard at every door.',
+    (extra ? '- Scene Pacing: ' + pacing : ''), '</details>'].filter(Boolean).join('\n');
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('Aftermath', true) });
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('Slow Burn', true) });
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('Rising', true) });
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('', false) });   // the drifted one
+captured = [];
+ctx.ConnectionManagerRequestService = capture('noted');
+document.getElementById('cc_input').value = '#m structure';
+clickFresh('cc_send');
+await sleep(700);
+const shapeFlags = captured.join('\n');
+ok(/field-shape/.test(shapeFlags) && /MISSING: Scene Pacing/.test(shapeFlags), 'a block missing a field the other scenes all carry is flagged by name');
+ok(/#3 \[N\]/.test(shapeFlags) && !/#0 \[N\]/.test(shapeFlags), 'only the drifted scene is flagged; the three that agree are the norm');
+
+// Evidence threshold: two agreeing scenes are not yet a norm, so a young chat is
+// never nagged about a shape it has not established.
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('Aftermath', true) });
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('Slow Burn', true) });
+ctx.chat.push({ is_user: false, name: 'N', mes: shaped('', false) });
+captured = [];
+ctx.ConnectionManagerRequestService = capture('noted');
+document.getElementById('cc_input').value = '#m structure';
+clickFresh('cc_send');
+await sleep(700);
+ok(!/field-shape/.test(captured.join('\n')), 'with only two agreeing scenes, shape drift is NOT reported (no norm established yet)');
+
+console.log('== v2.72.0: a stopped audit resumes where it stopped ==');
+dismissPending();
+ctx.chat.length = 0;
+for (let i = 0; i < 20; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Scene ' + i + ' happened.' });
+CA.auditWindow = 4;
+let contCalls = 0;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        if (all.includes('PASS 2 of 4')) {
+            contCalls++;
+            if (contCalls === 2) { const b = document.getElementById('cc_send'); if (b) b.click(); }   // Stop, mid-sweep
+            return 'WINDOW CLEAN';
+        }
+        return 'ok';
+    },
+};
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(1500);
+const cursor = ((ctx.chatMetadata['continuityCopilot'] || {}).audit || {}).cursor;
+ok(contCalls < 5, 'Stop actually halted the sweep instead of running every window (' + contCalls + ' windows ran)');
+ok(cursor > 0, 'the resume point was persisted to chat metadata (cursor #' + cursor + ')');
+ok(/resumes from #/.test(ccLogText().join('\n')), 'the user is told exactly where the next run picks up');
+contCalls = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { const all = messages.map(m => String(m.content || '')).join('\n'); if (all.includes('PASS 2 of 4')) { contCalls++; } return 'WINDOW CLEAN'; } };
+document.getElementById('cc_input').value = '#m';
+clickFresh('cc_send');
+await sleep(1500);
+ok(contCalls === Math.ceil((20 - cursor) / 4), 'the next run resumed from the saved cursor rather than re-auditing from #0 (' + contCalls + ' windows)');
+ok(/Resuming the continuity sweep from #/.test(ccLogText().join('\n')), 'the resume is announced, not silent');
+
+console.log('== v2.72.0: an edit anchored in a SLICE is caught before it fails ==');
+// The blind-edit guard used to trust "was fetched". Under a cap, a fetched PART
+// is not a read: a "find" copied out of a slice is exactly as blind as one
+// invented, so the guard must re-serve the message before the edit is staged.
+dismissPending();
+CA.recentFull = 0;
+CA.fullTextCap = 4000;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'B'.repeat(9000) + 'REAL_TAIL_ONLY_IN_PART_3' });
+let blindTurn = 0;
+const blindSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        blindSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        blindTurn++;
+        if (blindTurn === 1) return '<fetch>["0#1"]</fetch>';
+        if (blindTurn === 2) return '<edits>[{"id":0,"find":"BBBB","replace":"CCCC","reason":"guess"}]</edits>';
+        return 'ok';
+    },
+};
+document.getElementById('cc_input').value = 'fix the end of it';
+clickFresh('cc_send');
+await sleep(900);
+ok(/Auto-fetched #0/.test(ccLogText().join('\n')), 'an edit proposed off a PART triggers the auto-fetch instead of being staged blind');
+CA.fullTextCap = 0;
+CA.recentFull = 8;
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
