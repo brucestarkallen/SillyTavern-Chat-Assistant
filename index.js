@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.75.0';
+    const VERSION = '2.76.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -127,6 +127,7 @@
         '- INCOMPLETE / PART n OF m means you hold a slice. NEVER judge how the message ends, whether a tag is closed, or whether anything is duplicated, from a slice. Fetch the remaining parts first \u2014 <fetch>["27#2"]</fetch> \u2014 then reason.',
         '- A structural claim about a message ("junk after </details>", "two blocks", "the block is intact") may ONLY be made from a COMPLETE copy. The [MESSAGE INDEX] preview is 150 characters of the opening and proves nothing about structure.',
         '- A find/replace removes ONLY the text it matched. To delete everything from a marker to the end of a message, the "find" must literally contain that entire tail \u2014 or omit "find" and replace the whole message. Never tell the user a cut will also swallow text the "find" does not cover.',
+        '- ANCHORS ARE COPIES, NOT DESCRIPTIONS. Every \"find\" must be copied character-for-character out of text you are actually holding. Never build one from a [MESSAGE INDEX] preview line or a [MEMORY SPINE] line \u2014 both are clipped and whitespace-collapsed, so an anchor taken from either cannot match and the edit is dead on arrival. If you do not hold the full text, ask for it (<fetch> a message, <verify> a memory entry) instead of reconstructing it.',
         '- If a repair does not hold, re-read the CURRENT complete text before proposing again. Do not stack blind snips.',
     ].join('\n');
 
@@ -3401,6 +3402,78 @@
         return rest ? prompt + '\n\nAdditional instruction from the user: ' + rest : prompt;
     }
 
+
+    // An anchor that does not exist cannot be applied \u2014 and until v2.76 nobody
+    // found that out until Apply, which turned it into a failed card the user had
+    // to notice and ask about. This runs the SAME resolver the apply uses (locate,
+    // fuzzy floor and all), so a "problem" here is a guaranteed failure there and
+    // never a false alarm. Caught while the exact text is still in the conversation,
+    // it becomes a silent self-correction instead of a re-proposal round trip.
+    function memLocateAny(needle) {
+        let found = 0;
+        let ambiguous = false;
+        memStrings(t => {
+            const loc = locate(t, needle);
+            if (!loc) return;
+            if (loc.ambiguous) { ambiguous = true; found += Number(loc.ambiguous) || 2; }
+            else found++;
+        });
+        return { found, ambiguous };
+    }
+
+    // Is this staged proposal's anchor still findable? Same resolver as the apply,
+    // so "dead" here means "guaranteed to fail there".
+    function anchorIsDead(e) {
+        if (!e || e.edited) return false;
+        try {
+            if (e.kind === 'mem') {
+                if (typeof e.find !== 'string' || !e.find) return false;
+                const r = memLocateAny(stripMemLabels(e.find));
+                return !r.found;
+            }
+            if (e.kind === 'wi' || e.bulk) return false;
+            if (typeof e.find !== 'string' || !e.find) return false;
+            const m = (ctx().chat || [])[Number(e.id)];
+            if (!m) return false;
+            return !locate(String(m.mes || ''), e.find);
+        } catch (_) { return false; }
+    }
+
+    function anchorProblems(edits, memEdits) {
+        const out = [];
+        const chat = ctx().chat || [];
+        for (const e of (edits || [])) {
+            if (!e || e.kind === 'mem' || e.kind === 'wi' || e.bulk) continue;
+            if (typeof e.find !== 'string' || !e.find) continue;
+            if (!Number.isInteger(e.id)) continue;
+            const m = chat[e.id];
+            if (!m) continue;                       // "no such message" is a different error
+            if (!msgServedWhole(e.id)) continue;    // the blind-edit guard owns the unread case
+            const loc = locate(String(m.mes || ''), e.find);
+            if (!loc) out.push({ where: 'message #' + e.id, why: 'that exact text does not occur in message #' + e.id, find: e.find });
+            else if (loc.ambiguous) out.push({ where: 'message #' + e.id, why: 'that text occurs in ' + loc.ambiguous + ' places in message #' + e.id + ' \u2014 the excerpt must be unique', find: e.find });
+        }
+        for (const e of (memEdits || [])) {
+            if (!e || typeof e.find !== 'string' || !e.find) continue;
+            const needle = stripMemLabels(e.find);
+            const r = memLocateAny(needle);
+            if (!r.found) out.push({ where: 'memory' + (e.path ? ' (' + e.path + ')' : ''), why: 'that exact text does not occur anywhere in the memory', find: e.find });
+            else if (r.ambiguous && !e.path) out.push({ where: 'memory', why: 'that text occurs in several places \u2014 give a longer unique excerpt or a "path"', find: e.find });
+        }
+        return out;
+    }
+
+    function anchorRepairPrompt(problems) {
+        const clipf = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').slice(0, 90);
+        return '[ANCHOR CHECK \u2014 these proposals cannot apply as written]\n'
+            + problems.map(p => '- ' + p.where + ': ' + p.why + '\n    your "find" was: \u201C' + clipf(p.find) + '\u201D').join('\n')
+            + '\n\nA "find" is not a description of the text \u2014 it is a copy of it. Re-send ONLY the corrected proposals, each "find" copied character-for-character from the text already in this conversation.'
+            + '\n- NEVER build a "find" from a [MESSAGE INDEX] preview line or a [MEMORY SPINE] line. Both are clipped, whitespace-collapsed extracts; they exist to tell you WHAT is there and WHERE, never to be quoted.'
+            + '\n- If you do not hold the full text of the thing you are fixing, ask for it (<fetch> for a message, <verify> for a memory entry) instead of reconstructing it.'
+            + '\n- Keep each edit tiny: the one wrong word can be the whole "find". A find can never span two separate fields or entries, and can never add a sentence that is not already there.'
+            + '\nEvery other proposal from your last reply is still standing \u2014 do not repeat those.';
+    }
+
     // Chat edits whose "find" cannot possibly match because the model never read the
     // target message in full: it is older than the full-text window (winStart) and was
     // not fetched, so the "find" is a reconstruction. These get auto-fetched + re-proposed.
@@ -3558,6 +3631,7 @@
             const rounds = numSetting(settings.fetchRounds, defaults.fetchRounds, 0, 6);
             const fetchedIds = new Set();    // ids served WHOLE
             const fetchedRefs = new Set();   // id#part keys actually served
+            let anchorRepaired = false;      // the anchor correction gets one round, not a loop
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
                 const split = await callLLMSmart(messages, live);
@@ -3597,6 +3671,21 @@
                         addBubble('note', bnote); pushHistoryTo(sessObj, 'note', bnote);
                         messages.push({ role: 'assistant', content: reply });
                         messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(blind) + '\n\nYou proposed an <edits> change to the message(s) above but had only their one-line preview \u2014 so a "find" may not match, and a whole-message rewrite could lose content. Their exact text is now provided. RE-PROPOSE your change against it: for a targeted fix, copy the "find" VERBATIM from the text above; for a whole-message rewrite, base it on this real text and keep everything that should stay. Omit an edit if it no longer needs changing, and keep every other proposal unchanged.' });
+                        continue;
+                    }
+                }
+                // Same idea as the blind-edit fetch, one step later: the model HAS the
+                // text and still produced an anchor that is not in it. Correct it here
+                // rather than staging a card that is already dead.
+                if (round < rounds && !anchorRepaired) {
+                    let problems = [];
+                    try { problems = anchorProblems(parseEdits(reply).edits, parseMemEdits(reply).edits); } catch (_) { /* ignore */ }
+                    if (problems.length) {
+                        anchorRepaired = true;   // one correction round, never a loop
+                        const anote = '\u2693 Anchor check: ' + problems.length + ' proposal(s) had a "find" that does not exist in the target \u2014 asked for a corrected version before staging.';
+                        addBubble('note', anote); pushHistoryTo(sessObj, 'note', anote);
+                        messages.push({ role: 'assistant', content: reply });
+                        messages.push({ role: 'user', content: anchorRepairPrompt(problems) });
                         continue;
                     }
                 }
@@ -3743,9 +3832,21 @@
                 // corrected version has a different anchor by definition, so the
                 // anchor-equality rule can never match. Either way the failed card is
                 // dead weight once a successor exists.
-                const hit = uniqueNew.some(nE => wasFailed ? sameConcreteTarget(oldE, nE) : supersededByNew(oldE, nE));
+                // sameConcreteTarget is deliberately loose for a FAILED card: its anchor
+                // did not match and cannot start matching, so leaving it staged can only
+                // produce the same failure a second time.
+                // A PENDING card whose anchor no longer exists is already dead: applying
+                // it can only fail. Until v2.76 supersede required anchor EQUALITY, so a
+                // corrected re-proposal — which by definition carries a different anchor
+                // — never retired the wrong one, and the user had to dismiss it by hand
+                // every single time. Dead cards now retire on any newer proposal for the
+                // same target; a still-valid independent fix is untouched.
+                const dead = !wasFailed && anchorIsDead(oldE);
+                const hit = uniqueNew.some(nE => (wasFailed || dead) ? sameConcreteTarget(oldE, nE) : supersededByNew(oldE, nE));
                 if (hit) {
-                    const tag = wasFailed ? 'skipped \u2014 replaced after failing' : 'skipped \u2014 superseded by the newest batch';
+                    const tag = wasFailed ? 'skipped \u2014 replaced after failing'
+                        : dead ? 'skipped \u2014 its anchor no longer matches; replaced by the newer proposal'
+                        : 'skipped \u2014 superseded by the newest batch';
                     if (oldE.kind === 'wi') oldE.editStatus = tag;
                     else oldE.status = tag;
                     autoSup++;
@@ -3789,12 +3890,27 @@
         const messages = systemTexts.filter(Boolean).map(t => ({ role: 'system', content: t }));
         messages.push({ role: 'user', content: userText });
         let reply = '';
-        for (let round = 0; round <= rounds; round++) {
+        let anchorFixed = false;
+        // The audit gets the anchor pre-flight too, and always at least one round for
+        // it: a sweep that stages dead cards makes the user do the extension's job.
+        const maxRounds = Math.max(rounds, 1);
+        for (let round = 0; round <= maxRounds; round++) {
             if (stopRequested) break;
             const sp = await callLLMSmart(messages, tick ? tick.onPartial : undefined);
             reply = (sp && sp.rest) ? sp.rest : '';
+            if (round === maxRounds) break;
+            if (!anchorFixed) {
+                let problems = [];
+                try { problems = anchorProblems(parseEdits(reply).edits, parseMemEdits(reply).edits); } catch (_) { /* ignore */ }
+                if (problems.length) {
+                    anchorFixed = true;
+                    messages.push({ role: 'assistant', content: reply });
+                    messages.push({ role: 'user', content: anchorRepairPrompt(problems) });
+                    continue;
+                }
+            }
             const req = parseFetch(reply);
-            if (!req || round === rounds) break;
+            if (!req) break;
             messages.push({ role: 'assistant', content: reply });
             messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(req.refs, 0) });
         }
@@ -4032,7 +4148,7 @@
                         const reply = await auditAsk([
                             sysPrompt(),
                             AUDITOR_DOCTRINE,
-                            '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS]\n' + spine,
+                            '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS. Each line is a CLIPPED, whitespace-collapsed 90-character extract: use it to know what exists and where, NEVER as the source of a "find". To fix an entry that is not in your section, name it in <verify> and wait for its real text.]\n' + spine,
                             orderFlags.length ? '[ORDER FLAGS \u2014 proven by a code scan of the coverage ranges]\n' + formatMemoryFlags(orderFlags) : '',
                             carry.length ? '[FINDINGS SO FAR \u2014 from earlier sections; do not re-report]\n' + carry.join('\n').slice(0, 6000) : '',
                             '[STORY MEMORY' + (chunks.length > 1 ? ' \u2014 section ' + (k + 1) + ' of ' + chunks.length : '') + ']\n' + chunks[k],
@@ -4055,7 +4171,7 @@
                         const reply = await auditAsk([
                             sysPrompt(),
                             AUDITOR_DOCTRINE,
-                            '[MEMORY SPINE \u2014 every entry in story order]\n' + spine,
+                            '[MEMORY SPINE \u2014 every entry in story order. CLIPPED 90-character extracts: never the source of a "find".]\n' + spine,
                             orderFlags.length ? '[ORDER FLAGS]\n' + formatMemoryFlags(orderFlags) : '',
                             carry.length ? '[FINDINGS SO FAR]\n' + carry.join('\n').slice(0, 8000) : '(no section raised a finding)',
                         ], AUDIT_CROSS_PROMPT + extraLine, 0, tick);
@@ -4162,7 +4278,7 @@
                     sysPrompt(),
                     AUDITOR_DOCTRINE,
                     '[MESSAGE INDEX]\n' + buildIndex(),
-                    chunks.length > 1 ? '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS]\n' + memorySpine(memText) : '',
+                    chunks.length > 1 ? '[MEMORY SPINE \u2014 every entry in story order; the section below is a slice of THIS. CLIPPED 90-character extracts \u2014 never the source of a "find".]\n' + memorySpine(memText) : '',
                     '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
                 ], prompt + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
                 if (!sameChat(chatAt)) break;
@@ -5509,8 +5625,14 @@
         if (a.kind !== b.kind) return false;
         if (a.kind === 'mem') {
             const plain = (x) => x.append === undefined && x.remove === undefined;
-            if (!a.path || !b.path) return (a.find !== null && a.find === b.find);
-            return a.path === b.path && plain(a) === plain(b);
+            if (plain(a) !== plain(b)) return false;
+            if (a.path && b.path) return a.path === b.path;
+            // Pathless memory edits address the same store. Compared by anchor
+            // equality they could never match a CORRECTED re-proposal — a different
+            // anchor is the whole point of correcting one — so the dead card sat
+            // there and the user dismissed it by hand. Callers gate this on the old
+            // card being dead, so a still-valid independent fix is never retired.
+            return true;
         }
         if (a.kind === 'wi') {
             if (a.createBook || b.createBook || a.newEntry || b.newEntry || a.deleteEntry || b.deleteEntry) return false;

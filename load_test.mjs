@@ -1749,6 +1749,122 @@ await sleep(1800);
 ok(crossRan === 0, 'a memory that fits in ONE section needs no cross-section pass and is not charged for one');
 ok(/coverage runs forward, no overlaps or duplicates/.test(ccLogText().join('\n')), 'a clean ordering is reported as a positive result, not silence');
 
+console.log('== v2.76.0: an anchor that cannot match never becomes a card ==');
+// A "find" that does not exist used to sail through staging and fail at Apply —
+// so the user had to notice the failure and ask for a re-proposal. The check now
+// runs the SAME resolver the apply uses, while the real text is still in context.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.recentFull = 8;
+CA.fetchRounds = 3;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'The queen crossed the yard at dusk and said nothing to the guard.' });
+ctx.chatMetadata.summary_memory = 'The queen crossed the yard at dusk. (covers chat messages #0 to #0)';
+
+let aTurn = 0;
+const seen = [];
+const proposalNotesBefore = (ccLogText().join('\n').match(/proposed edits below/g) || []).length;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        seen.push(messages.map(m => String(m.content || '')).join('\n'));
+        aTurn++;
+        if (aTurn === 1) return 'Fixing it.\n<edits>[{"id":0,"find":"the queen walked across the courtyard at sunset","replace":"X","reason":"paraphrased anchor"}]</edits>';
+        return 'Corrected.\n<edits>[{"id":0,"find":"crossed the yard at dusk","replace":"crossed the yard at dawn","reason":"fixed"}]</edits>';
+    },
+};
+document.getElementById('cc_input').value = 'fix the time of day';
+clickFresh('cc_send');
+await sleep(900);
+// The log carries both textContent and innerHTML, so quotes appear HTML-escaped:
+// match the stable prose, not the punctuation around it.
+const anchorNotes = () => (ccLogText().join('\n').match(/Anchor check: \d+ proposal/g) || []).length;
+const anchorLog = ccLogText().join('\n');
+ok(/Anchor check: 1 proposal\(s\) had a/.test(anchorLog) && /that does not exist in the target/.test(anchorLog), 'the impossible anchor is caught BEFORE staging, not at Apply');
+ok(seen.length >= 2 && /ANCHOR CHECK — these proposals cannot apply as written/.test(seen[1]), 'the model is handed the failure and asked to correct it in the same run');
+ok(/that exact text does not occur in message #0/.test(seen[1]), 'it is told exactly which target the anchor missed');
+ok(/NEVER build a "find" from a \[MESSAGE INDEX\] preview line or a \[MEMORY SPINE\] line/.test(seen[1]), 'and told where anchors must never come from');
+ok((ccLogText().join('\n').match(/proposed edits below/g) || []).length === proposalNotesBefore + 1, 'only ONE reply was ingested — the dead first proposal was corrected, not staged and then patched');
+
+// A GOOD anchor must not trigger the check — a false alarm would cost a round on
+// every reply. The resolver is the apply's own, fuzzy floor included.
+dismissPending();
+const anchorsBefore = anchorNotes();
+aTurn = 0;
+let goodRounds = 0;
+ctx.ConnectionManagerRequestService = {
+    // A DIFFERENT edit from the one just dismissed: an identical re-proposal of a
+    // dismissed card is correctly suppressed, which would prove nothing here.
+    sendRequest: async () => { goodRounds++; return '<edits>[{"id":0,"find":"said nothing to the guard","replace":"said nothing to the sentry","reason":"ok"}]</edits>'; },
+};
+document.getElementById('cc_input').value = 'fix it again';
+clickFresh('cc_send');
+await sleep(700);
+ok(goodRounds === 1, 'a valid anchor costs no extra round (got ' + goodRounds + ')');
+// goodRounds === 1 above is the real proof no correction round fired; what matters
+// next is that the valid proposal actually reached the user as a card.
+void anchorsBefore; void anchorNotes;
+ok(/proposed edits below/.test(ccLogText().slice(-2).join(' ')), 'and the valid proposal is ingested normally rather than sent back for correction');
+
+console.log('== v2.76.0: a memory anchor is checked against the live memory ==');
+dismissPending();
+aTurn = 0;
+const memSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        memSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        aTurn++;
+        if (aTurn === 1) return '<memedits>[{"find":"The monarch traversed the courtyard","replace":"Y","reason":"invented"}]</memedits>';
+        return 'MEMORY CONSISTENT';
+    },
+};
+document.getElementById('cc_input').value = 'fix the memory line';
+clickFresh('cc_send');
+await sleep(900);
+ok(memSeen.length >= 2 && /that exact text does not occur anywhere in the memory/.test(memSeen[1]), 'an invented memory anchor is caught against the live memory');
+
+console.log('== v2.76.0: a dead card does not outlive its replacement ==');
+// supersededByNew() retired an older PENDING card only on anchor EQUALITY. A
+// corrected re-proposal carries a DIFFERENT anchor by definition — that is the
+// point of correcting it — so the wrong card could never be retired and the user
+// dismissed it by hand every time. Cards are not in the DOM in this harness, so
+// the observable is the ingest note.
+dismissPending();
+const skipNotes = () => (ccLogText().join('\n').match(/auto-skipped/gi) || []).length;
+
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'A scene that is not being edited here.' });
+ctx.chatMetadata.summary_memory = 'ALPHA line: the queen crossed the yard at dusk.\nGAMMA line: the steward counted the ravens.';
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<memedits>[{"find":"ALPHA line: the queen crossed the yard at dusk.","replace":"ALPHA line: the queen crossed the yard at dawn.","reason":"first try"}]</memedits>' };
+document.getElementById('cc_input').value = 'fix the alpha line';
+clickFresh('cc_send');
+await sleep(700);
+const skipsBefore = skipNotes();
+
+// The memory drifts underneath the staged card: its anchor is now unfindable.
+ctx.chatMetadata.summary_memory = 'BETA line: the queen crossed the courtyard at dusk.\nGAMMA line: the steward counted the ravens.';
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<memedits>[{"find":"BETA line: the queen crossed the courtyard at dusk.","replace":"BETA line: the queen crossed the courtyard at dawn.","reason":"corrected anchor"}]</memedits>' };
+document.getElementById('cc_input').value = 'try again against the current memory';
+clickFresh('cc_send');
+await sleep(900);
+ok(skipNotes() > skipsBefore, 'a corrected proposal retires the dead card automatically — no hand dismissal (' + skipsBefore + ' -> ' + skipNotes() + ')');
+ok(/anchor no longer matches/i.test(ccLogText().join('\n')) || /older duplicate\(s\) auto-skipped/i.test(ccLogText().join('\n')), 'and the reason is stated rather than the card just vanishing');
+
+// The other half of the rule: a still-VALID pending fix must survive a new,
+// unrelated proposal. Retiring those would silently drop work the user wanted.
+dismissPending();
+ctx.chatMetadata.summary_memory = 'ALPHA line: the queen crossed the yard at dusk.\nGAMMA line: the steward counted the ravens.';
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<memedits>[{"find":"ALPHA line: the queen crossed the yard at dusk.","replace":"ALPHA line: the queen crossed the yard at dawn.","reason":"still valid"}]</memedits>' };
+document.getElementById('cc_input').value = 'fix alpha';
+clickFresh('cc_send');
+await sleep(700);
+const skipsBefore2 = skipNotes();
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<memedits>[{"find":"GAMMA line: the steward counted the ravens.","replace":"GAMMA line: the steward counted the ravens twice.","reason":"different line"}]</memedits>' };
+document.getElementById('cc_input').value = 'now fix gamma too';
+clickFresh('cc_send');
+await sleep(900);
+ok(skipNotes() === skipsBefore2, 'a pending fix whose anchor is still good is NOT retired by an unrelated new proposal (' + skipsBefore2 + ' -> ' + skipNotes() + ')');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

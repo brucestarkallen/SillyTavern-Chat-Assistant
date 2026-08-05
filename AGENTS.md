@@ -37,9 +37,17 @@ There is no other gate and no partial credit.
 - **`continuityCopilot` is the storage MODULE id.** Renaming it orphans every user's settings and per-chat data.
 - **The deep audit sweeps VISIBLE messages only.** A ghosted message is already represented by a memory snippet; sweeping it linearly audits the same events twice and is what made a full run take an hour. Ghosted originals are pulled only where a pass states a doubt (`<verify>`), and a call budget pauses the run at a saved cursor rather than letting it run unbounded.
 - **The memory is one ordered story, not a bag of entries.** Any pass that chunks it must ship `memorySpine()` with every chunk (or a contradiction between distant entries is unseeable), carry findings forward, and run the cross-section pass when there is more than one chunk. Chunk boundaries never fall inside an entry — the old character-count slice was the v2.72 truncation bug hiding in the memory path.
+- **An anchor is a copy, not a description.** Every proposal is checked at arrival with the apply's own resolver (`locate` / `memLocateAny`, fuzzy floor included) so a flag is a guaranteed failure, never a false alarm; a bad one is corrected inside the same run. Blocks that carry clipped text (`[MESSAGE INDEX]`, `[MEMORY SPINE]`) must declare themselves unquotable in their own header — text that cannot be an anchor must say so where it is shown.
+- **A pending card whose anchor is dead is retired by the next proposal for the same target.** Supersede must never require anchor *equality*: a corrected re-proposal carries a different anchor by definition. Gate retirement on `anchorIsDead`, never on target match alone, or still-valid independent fixes get silently dropped.
 - **Chat-scoped state, not global.** Director, hidden ledger, session history, and the deep-audit resume cursor all live in `chatMetadata.continuityCopilot`.
 - **Undo is refusal-first and node-scoped**: backups and drift fingerprints are taken at the edited node, never at the root key.
 - **Model-agnostic:** never hardcode a model identity or design around one model's quirks.
+
+## Harness limits worth knowing
+
+`load_test.mjs` drives the module against a mocked SillyTavern, but **the proposal-card DOM is never built** — `#cc_edits` does not exist, so any assertion reading card text passes vacuously and proves nothing. Assert on the **notes** the extension emits instead (`auto-skipped`, `Anchor check:`, `proposed edits below`), which are real observable behaviour. The same applies to `cc_applyall` / `cc_dismissall`: `dismissPending()` is a no-op in this harness.
+
+Two more traps that cost time in this repo: an identical re-proposal of a *dismissed* card is correctly suppressed, so a fixture that re-sends the same edit proves nothing; and the log text concatenates `textContent` **and** `innerHTML`, so quotes appear HTML-escaped — match prose, not punctuation.
 
 ## Environment
 
