@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.71.0';
+    const VERSION = '2.72.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -47,7 +47,7 @@
         'Each request gives you:',
         '- [STORY MEMORY]: ground truth pulled from the user\'s memory extensions (summaries, snippets, audits, notes).',
         '- [MESSAGE INDEX]: one line per chat message: #id [speaker] preview.',
-        '- [FULL MESSAGES]: complete text of some messages.',
+        '- [FULL MESSAGES]: the last N messages, each one WHOLE \u2014 every message carries a header with its exact character count and the verdict COMPLETE or INCOMPLETE.',
         '- [CONTINUITY FLAGS] (when present): source-level contradictions Summaryception\'s memory auditor found between a chat message and established canon \u2014 fix each in the chat message it names.',
         '- [DIRECTOR NOTES] (when a directive is active): the secret episode plan \u2014 author-level; readable and discussable with the user, but planned beats are INTENT, not canon.',
         '- [EDITOR CRITIQUE] (when present): the standing craft notes currently injected to the storyteller.',
@@ -57,7 +57,7 @@
         '1. [STORY MEMORY] and the user\'s own statements outrank the chat text when they conflict.',
         '2. If you must read messages that were not given in full, reply with ONLY this block and nothing else:',
         '<fetch>[12, 13, 27]</fetch>',
-        'Their full text will be sent to you, then you answer properly.',
+        'Their full text will be sent to you, then you answer properly. A single part of an over-cap message is requested as "27#2" (id, #, part number).',
         '3. To change chat messages, include exactly one block in your reply:',
         '<edits>',
         '[',
@@ -72,6 +72,13 @@
         '5. Outside those blocks, talk to the user naturally. Keep repair talk brief and concrete; for brainstorming and story discussion you may write more. Never paste whole chat messages back at them.',
         '6. You can ALSO create, edit, configure, and delete SillyTavern Worldbook / World Info (lorebook) entries \u2014 whenever the <wiedits> instructions appear in this prompt, worldbook editing is fully in scope: use it and NEVER say you cannot. (A [WORLDBOOK] block, when present, shows existing entries; you can create brand-new ones even without it.) If the <wiedits> instructions are NOT present and the user asks for lorebook work, do NOT refuse flatly or invent a format \u2014 warmly explain that a World Info book just needs to be open/active in SillyTavern for you to edit it, and offer to proceed the moment it is.',
     ].join('\n');
+
+    // Stored copies of the 2.71 default are auto-upgraded (loadSettings); a
+    // customized prompt is left alone — which is exactly why the completeness
+    // contract lives in MESSAGE_TEXT_RULES, outside the editable prompt.
+    const LEGACY_SYSTEM_PROMPT_V271 = DEFAULT_SYSTEM_PROMPT
+        .replace('- [FULL MESSAGES]: the last N messages, each one WHOLE \u2014 every message carries a header with its exact character count and the verdict COMPLETE or INCOMPLETE.', '- [FULL MESSAGES]: complete text of some messages.')
+        .replace('Their full text will be sent to you, then you answer properly. A single part of an over-cap message is requested as "27#2" (id, #, part number).', 'Their full text will be sent to you, then you answer properly.');
 
     const MEMEDIT_RULES = [
         'Memory editing:',
@@ -108,17 +115,74 @@
         '- VALID JSON is required in every edits / memedits / wiedits block: property names and string values in double quotes; write EVERY line break inside a value as \\n (never a real line break); escape any double-quote inside a value as \\" or use single quotes instead; no comments, no trailing commas, no markdown fences. A single stray character makes the whole block unparseable \u2014 keep each value on one line where you can.',
     ].join('\n');
 
+    // NOT user-editable, and appended by sysPrompt() on every request: this is the
+    // contract that makes any conclusion about where a message ENDS trustworthy.
+    // It must never be able to go stale inside somebody's customized system prompt
+    // — a reader who cannot tell a whole message from a stump produces confident
+    // wrong answers about structure, which is exactly the failure this pack fixes.
+    const MESSAGE_TEXT_RULES = [
+        'HOW MESSAGE TEXT IS SERVED TO YOU \u2014 read before reasoning about any message\'s shape:',
+        '- Every message in [FULL MESSAGES] or a fetch result carries a header with its exact character count and one of two verdicts.',
+        '- COMPLETE means COMPLETE: you hold the entire message, first character to last. If the text ends at a closing tag, the message ends there. If you see one block, there is one block. Do not hedge, do not suspect a hidden tail, and do not ask the user to paste the ending \u2014 the header count IS the whole message.',
+        '- INCOMPLETE / PART n OF m means you hold a slice. NEVER judge how the message ends, whether a tag is closed, or whether anything is duplicated, from a slice. Fetch the remaining parts first \u2014 <fetch>["27#2"]</fetch> \u2014 then reason.',
+        '- A structural claim about a message ("junk after </details>", "two blocks", "the block is intact") may ONLY be made from a COMPLETE copy. The [MESSAGE INDEX] preview is 150 characters of the opening and proves nothing about structure.',
+        '- A find/replace removes ONLY the text it matched. To delete everything from a marker to the end of a message, the "find" must literally contain that entire tail \u2014 or omit "find" and replace the whole message. Never tell the user a cut will also swallow text the "find" does not cover.',
+        '- If a repair does not hold, re-read the CURRENT complete text before proposing again. Do not stack blind snips.',
+    ].join('\n');
+
     const AUDIT_PROMPT = 'Audit the whole chat against [STORY MEMORY]. Look for continuity and logic errors: wrong locations, wrong character knowledge (information quarantine breaks), timeline contradictions, dropped or duplicated plot state. Fetch full messages if you need them, then list what you found and propose fixes in an <edits> block, plus <memedits> wherever the memory itself is wrong.';
 
+    // #m stopped being a single prompt in v2.72: it runs the four-pass sweep in
+    // runDeepAudit(). The line stays in the editable list so the panel documents it.
+    const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself; (4) FIDELITY of each memory section to the originals it covers. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point). It resumes where a stopped run left off.';
+    const LEGACY_M_SHORTCUT = '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.';
     const PSYCH_SHORTCUT = '#p = Analyze the psychology of the character I name (or the most active one if none is named). Use only [STORY MEMORY] and the chat. Cover: (1) core drives, fears, and formative wounds as established in canon; (2) internal contradictions in how the character is written; (3) consistency: does recent behavior match the established characterization? Flag any out-of-character drift, citing the specific turns; (4) what the character would plausibly do next under the current pressure, and what would ring false. Ground every claim in something concrete. Do not propose edits unless I ask.';
     const DEFAULT_SHORTCUTS = [
         '#s = Check the CURRENT session against [STORY MEMORY]. Use <fetch> to pull any listed messages you have not seen in full. Then find (1) events, facts, or state changes MISSING from the memory and (2) memory entries that are stale or contradicted by the chat. Propose every correction in a single <memedits> block with "find" copied verbatim from [STORY MEMORY]. Do NOT propose <edits> to chat messages unless I explicitly ask.',
         '#f = Check the chat against [STORY MEMORY] and fix every continuity error you find with a single <edits> block.',
         '#o = Scan the chat for OOC/meta exchanges (out-of-character notes, corrections, discussions in (( )), [brackets], or marked OOC). Use <fetch> as needed. For each lesson found: (1) propose <edits> fixing any story text it corrected, (2) propose <memedits> persisting the lesson into the notepad, Author\'s Note (path note_prompt), or editor notes (path cc_critique), and (3) propose hiding the pure-OOC messages from AI context with {"id": n, "hide": true} entries. Nothing is deleted \u2014 hidden text stays in the log.',
         '#a = FIDELITY audit of the memory. For each snippet, use its "(covers chat messages #x to #y)" note to <fetch> the original ghosted messages, then verify two things: does the snippet text capture every plot-relevant event, and does its audit/detail field preserve the concrete facts (names, numbers, objects, places, injuries, promises, who-knows-what)? Report anything LOST or DISTORTED and propose <memedits> restoring the missing details into the snippet text or its detail field. If the memory is large, process ONE snippet per run and tell me where you stopped so I can continue.',
-        '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.',
+        DEEP_AUDIT_SHORTCUT,
         '#i = Brainstorm what could happen next. Give 3-5 distinct directions for the upcoming scene(s), each consistent with [STORY MEMORY] and the current situation: a one-line hook plus what it would develop. Do not write the scene itself and do not propose <edits>.',
         PSYCH_SHORTCUT,
+    ].join('\n');
+
+
+    // ------------------------------------------------------------------
+    // Deep audit (#m) \u2014 one command that audits everything, in passes
+    // ------------------------------------------------------------------
+    const AUDIT_STRUCTURE_PROMPT = [
+        'DEEP AUDIT \u2014 PASS 1 of 4: STRUCTURE.',
+        'A code scanner has already PROVEN the faults listed in [STRUCTURE FLAGS]. They are facts, not guesses. Every message below is served COMPLETE.',
+        'For each flagged message: locate the fault in the full text, then repair it in an <edits> block.',
+        '- Machine blocks (<details> blocks, tracker blocks, bracketed [TAG: ...] markers) appear ONCE per message, balanced, with the same field set the same block carries in the rest of the chat.',
+        '- Content duplicated FROM ANOTHER MESSAGE is deleted from this one. The other message keeps its own copy \u2014 never propose an edit to it, and never "merge" the two.',
+        '- Shrapnel (a fragment welded onto a closing tag, a severed half-sentence, an orphan tag) is DELETED, not rewritten.',
+        '- Copy every "find" verbatim from the text above. A find/replace removes only what it matches \u2014 to cut a whole tail the find must span the whole tail, or omit "find" and replace the entire message.',
+        '- Never invent story prose to fill a gap. If a repair needs new narrative content, say so and leave it for the user.',
+        'If a flag is a false positive on inspection, say so and skip it. One or two lines of report per message, then the edits block.',
+    ].join('\n');
+
+    const AUDIT_CONTINUITY_PROMPT = [
+        'DEEP AUDIT \u2014 PASS 2 of 4: CONTINUITY, over this window of the chat.',
+        'Audit ONLY the messages under audit (the ribbon above them is context that was already audited). They are served COMPLETE.',
+        'Against [STORY MEMORY] and the ribbon, find: wrong locations, wrong time of day or elapsed time, characters present who are elsewhere or absent who should be there, knowledge a character could not have (who witnessed what), objects/injuries/promises that appear or vanish, contradicted names, titles, numbers, and state that the memory records differently.',
+        'Report only REAL contradictions, each with the message id and the two things that disagree. If the window is clean, say exactly: WINDOW CLEAN.',
+        'Fix chat-side errors with <edits> (find copied verbatim from the text above). Where the MEMORY is the wrong one, fix it with <memedits> instead. Do not rewrite prose for style, only for truth.',
+    ].join('\n');
+
+    const AUDIT_MEMORY_PROMPT = [
+        'DEEP AUDIT \u2014 PASS 3 of 4: THE MEMORY AGAINST ITSELF.',
+        'Cross-check [STORY MEMORY]: the notepad/plot-essential vs every snippet vs every audit or detail field. Find contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and any audit that contradicts its own snippet.',
+        'Where two versions disagree, <fetch> the original messages to decide which is true before proposing anything.',
+        'Propose corrections in a single <memedits> block, "find" copied character-for-character from [STORY MEMORY]. If the memory is internally consistent, say exactly: MEMORY CONSISTENT.',
+    ].join('\n');
+
+    const AUDIT_FIDELITY_PROMPT = [
+        'DEEP AUDIT \u2014 PASS 4 of 4: FIDELITY of the memory to what actually happened.',
+        'For the memory section below, use its "(covers chat messages #x to #y)" notes to <fetch> the original messages, then verify two things: does the snippet capture every plot-relevant event, and does its audit/detail field preserve the concrete facts (names, numbers, objects, places, injuries, promises, who-knows-what)?',
+        'Report anything LOST or DISTORTED and restore it with <memedits> into the snippet text or its detail field. Never delete detail to make it shorter.',
+        'If this section is faithful, say exactly: SECTION FAITHFUL.',
     ].join('\n');
 
     const LEGACY_DIRECTOR_PROMPT = [
@@ -451,6 +515,15 @@
         profileId: '',
         recentFull: 8,
         fetchRounds: 3,
+        // 0 = no cap: a message is served WHOLE or not at all. Until v2.72 this was a
+        // hardcoded 8000-char .slice() with no marker, so every long scene reached the
+        // model as a mid-word stump labelled as its full text — the model then reasoned
+        // about the message's ENDING from a boundary the tool invented, and every edit
+        // moved that boundary and "revealed" more. If a cap is set, over-cap messages
+        // are served in numbered PARTS with a loud banner, never as a silent stump.
+        fullTextCap: 0,
+        auditWindow: 6,
+        auditFetchRounds: 1,
         maxTokens: 8192,
         llmTimeoutSec: 300,
         thinkRetries: 2,
@@ -596,7 +669,18 @@
             if (typeof settings.shortcuts === 'string' && settings.shortcuts.trim() && !/^\s*#p\s*=/m.test(settings.shortcuts)) {
                 settings.shortcuts = settings.shortcuts.replace(/\s*$/, '') + '\n' + PSYCH_SHORTCUT;
             }
+            // A stored copy of the OLD #m line would leave the panel documenting a
+            // command that no longer exists. Upgrade the untouched default; leave a
+            // hand-customized line alone (the routing is in send() either way).
+            if (typeof settings.shortcuts === 'string' && settings.shortcuts.includes(LEGACY_M_SHORTCUT)) {
+                settings.shortcuts = settings.shortcuts.replace(LEGACY_M_SHORTCUT, DEEP_AUDIT_SHORTCUT);
+            }
         } catch (e) { /* ignore */ }
+        // Same class: a stored copy of the 2.71 system prompt describes [FULL MESSAGES]
+        // as "complete text of some messages" — which was not true before v2.72.
+        if (typeof settings.systemPrompt === 'string' && settings.systemPrompt.trim() === LEGACY_SYSTEM_PROMPT_V271.trim()) {
+            settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+        }
     }
 
     function persistSettings() {
@@ -1415,17 +1499,262 @@
         return lines.join('\n') || '(chat is empty)';
     }
 
-    function fullTextOf(ids) {
+    // A message reference: 217 | "217" | "217#2" (id, part). Parts exist only when
+    // a fullTextCap is deliberately set; part 1 is the default and the only part of
+    // an uncapped message.
+    function parseMsgRef(raw) {
+        if (typeof raw === 'number') return Number.isInteger(raw) && raw >= 0 ? { id: raw, part: 1 } : null;
+        const m = String(raw == null ? '' : raw).trim().match(/^(\d+)\s*(?:#\s*(\d+))?$/);
+        if (!m) return null;
+        const id = Number(m[1]);
+        if (!Number.isInteger(id) || id < 0) return null;
+        return { id, part: m[2] ? Math.max(1, Number(m[2])) : 1 };
+    }
+
+    function refKey(ref) { return ref.id + '#' + ref.part; }
+
+    function textCap() { return numSetting(settings.fullTextCap, defaults.fullTextCap, 0, 200000); }
+
+    function partCount(len, cap) { return (cap > 0 && len > cap) ? Math.ceil(len / cap) : 1; }
+
+    // TRUE only when the copy the model was handed was the WHOLE message. Callers
+    // that treat "fetched" as "has read it in full" (the blind-edit guard) must ask
+    // this, not assume it — a part is not a message.
+    function msgServedWhole(id) {
+        const m = (ctx().chat || [])[Number(id)];
+        if (!m) return true;
+        return partCount(String(m.mes || '').length, textCap()) === 1;
+    }
+
+    // Pure. THE CONTRACT: the header states the exact character count and says, in
+    // one word, whether anything was withheld. Nothing else in this extension is
+    // allowed to hand the model message text without it.
+    function _formatMessage(id, who, text, cap, part) {
+        const full = String(text == null ? '' : text);
+        const total = full.length;
+        const parts = partCount(total, cap);
+        if (parts === 1) {
+            return '--- #' + id + ' [' + who + '] \u2014 ' + total
+                + ' chars, COMPLETE (entire message, first character to last; nothing omitted) ---\n' + full;
+        }
+        const p = Math.min(Math.max(1, part | 0 || 1), parts);
+        const start = (p - 1) * cap;
+        const body = full.slice(start, start + cap);
+        const after = total - start - body.length;
+        return '--- #' + id + ' [' + who + '] \u2014 PART ' + p + ' OF ' + parts
+            + ' (chars ' + (start + 1) + '\u2013' + (start + body.length) + ' of ' + total + '), INCOMPLETE ---\n'
+            + body
+            + '\n[\u26A0 CUT \u2014 NOT the whole message: ' + start + ' characters precede this slice and ' + after
+            + ' follow it. Do NOT judge how the message ends, whether a tag is closed, or whether anything is duplicated, from this part. Fetch the rest: <fetch>['
+            + (p < parts ? '"' + id + '#' + (p + 1) + '"' : '"' + id + '#1"')
+            + ']</fetch> \u2014 parts 1\u2013' + parts + ' are addressed as "' + id + '#N".]';
+    }
+
+    // capOverride: pass 0 to force WHOLE messages regardless of the user's cap.
+    // The deep audit does exactly that — a structural verdict read off a slice is
+    // worthless, so the audit never reads slices.
+    function fullTextOf(refs, capOverride) {
         const chat = ctx().chat || [];
+        const cap = (capOverride === 0 || capOverride > 0) ? capOverride : textCap();
         const out = [];
-        for (const raw of ids) {
-            const i = Number(raw);
-            const m = chat[i];
-            if (!m) { out.push('--- #' + raw + ' ---\n(no such message)'); continue; }
+        for (const raw of (refs || [])) {
+            // Accepts a parsed {id, part} (from parseFetch) or a bare id / "id#part".
+            const ref = (raw && typeof raw === 'object' && Number.isInteger(raw.id))
+                ? { id: raw.id, part: Math.max(1, (raw.part | 0) || 1) }
+                : parseMsgRef(raw);
+            if (!ref) { out.push('--- #' + raw + ' ---\n(not a valid message reference)'); continue; }
+            const m = chat[ref.id];
+            if (!m) { out.push('--- #' + ref.id + ' ---\n(no such message \u2014 this id does not exist in this chat)'); continue; }
             const who = m.is_user ? 'USER' : (m.name || 'AI');
-            out.push('--- #' + i + ' [' + who + '] ---\n' + String(m.mes || '').slice(0, 8000));
+            out.push(_formatMessage(ref.id, who, m.mes, cap, ref.part));
         }
         return out.join('\n\n');
+    }
+
+
+    // ------------------------------------------------------------------
+    // Structure scanner \u2014 deterministic, no model involved
+    // ------------------------------------------------------------------
+    // The fault class that costs whole evenings: a scene carrying the PREVIOUS
+    // scene's machine block glued on after its own, a severed fragment welded to a
+    // closing tag, an orphan tag, a block whose field set silently drifted from
+    // every other scene's. All of it is provable by a parser, so a parser proves
+    // it \u2014 a model is never asked to eyeball what code can decide. These findings
+    // are FACTS handed to the audit pass, not guesses it has to reproduce.
+
+    function detailsTags(text) {
+        const out = [];
+        const re = /<\/?details\b[^>]*>/gi;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            out.push({ close: m[0].charAt(1) === '/', at: m.index, end: m.index + m[0].length });
+            if (re.lastIndex === m.index) re.lastIndex++;   // paranoia: never spin on a zero-width match
+        }
+        return out;
+    }
+
+    function clip(str, n) {
+        const t = String(str == null ? '' : str).replace(/\s+/g, ' ').trim();
+        return t.length > n ? t.slice(0, n) + '\u2026' : t;
+    }
+
+    // The field grammar of one machine block: its <summary> label plus the top-level
+    // "- Name:" keys inside it, in order. Shape drift between scenes is the thing a
+    // display regex breaks on, and it is invisible to a reader skimming prose.
+    function blockShapes(text) {
+        const t = String(text == null ? '' : text);
+        const shapes = [];
+        const re = /<details\b[^>]*>([\s\S]*?)<\/details>/gi;
+        let m;
+        while ((m = re.exec(t)) !== null) {
+            const inner = m[1];
+            const lab = inner.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
+            const fields = [];
+            for (const f of inner.matchAll(/^[ \t]*[-*\u2022][ \t]*([A-Z][A-Za-z0-9 /'\u2019-]{1,40}):/gm)) {
+                const name = f[1].trim();
+                if (!fields.includes(name)) fields.push(name);
+            }
+            shapes.push({ label: lab ? clip(lab[1], 60) : '(no summary)', fields, at: m.index });
+        }
+        return shapes;
+    }
+
+    // Pure: every provable structural fault in ONE message.
+    function scanMessageStructure(text) {
+        const t = String(text == null ? '' : text);
+        const out = [];
+        const add = (code, detail, excerpt) => out.push({ code, detail, excerpt: excerpt ? clip(excerpt, 120) : '' });
+        if (!t.trim()) return out;
+
+        const tags = detailsTags(t);
+        let depth = 0;
+        let nested = 0;
+        let orphan = 0;
+        for (const tg of tags) {
+            if (tg.close) {
+                if (depth === 0) { orphan++; add('orphan-close', 'a </details> at character ' + tg.at + ' closes a block that was never opened', t.slice(Math.max(0, tg.at - 60), tg.end + 60)); }
+                else depth--;
+            } else {
+                if (depth > 0) nested++;
+                depth++;
+            }
+        }
+        if (nested) add('nested-block', nested + ' <details> block(s) opened inside another block \u2014 machine blocks must be siblings, never nested', '');
+        if (depth > 0) add('unclosed-block', depth + ' <details> block(s) are never closed \u2014 the message ends inside an open block', t.slice(-120));
+
+        // Two blocks carrying the SAME summary label: the previous scene's block
+        // duplicated into this one. This is the "double details" case exactly.
+        const shapes = blockShapes(t);
+        const seenLabel = new Map();
+        for (const sh of shapes) {
+            const k = sh.label.toLowerCase();
+            seenLabel.set(k, (seenLabel.get(k) || 0) + 1);
+        }
+        for (const [k, n] of seenLabel) {
+            if (n > 1) {
+                const first = shapes.find(x => x.label.toLowerCase() === k);
+                add('duplicate-block', n + ' blocks in this ONE message share the summary label "' + (first ? first.label : k) + '" \u2014 one of them is a duplicate that belongs to another message, or a leftover copy', '');
+            }
+        }
+
+        // Anything after the final closing tag. Welded directly onto the tag, or
+        // carrying block grammar, means shrapnel \u2014 not a closing paragraph.
+        if (tags.length && tags[tags.length - 1].close) {
+            const last = tags[tags.length - 1];
+            const tail = t.slice(last.end);
+            if (tail.trim()) {
+                const glued = /^[^\s]/.test(tail);
+                const blocky = /^\s*[-*\u2022]\s|Path [A-Z]\b|Selected Path|Scene Pacing|Next Path|<\/?details|<\/?summary/i.test(tail);
+                if (glued || blocky) {
+                    add('tail-after-block', (glued ? 'text is welded directly onto the final </details> with no break' : 'block-grammar text continues after the final </details>')
+                        + ' \u2014 ' + tail.trim().length + ' characters of it; the message must end at the closing tag',
+                        tail);
+                }
+            }
+        }
+
+        // A <summary> that never closes, or closes without opening.
+        const so = (t.match(/<summary\b/gi) || []).length;
+        const sc = (t.match(/<\/summary>/gi) || []).length;
+        if (so !== sc) add('summary-imbalance', so + ' <summary> open tag(s) vs ' + sc + ' closing tag(s)', '');
+
+        // A long line repeated verbatim: duplicated content, not prose rhythm.
+        const counts = new Map();
+        for (const raw of t.split('\n')) {
+            const line = raw.trim();
+            if (line.length < 40) continue;
+            counts.set(line, (counts.get(line) || 0) + 1);
+        }
+        let dupLines = 0;
+        let dupSample = '';
+        for (const [line, n] of counts) {
+            if (n > 1) { dupLines++; if (!dupSample) dupSample = line; }
+        }
+        if (dupLines) add('repeated-line', dupLines + ' line(s) of 40+ characters appear more than once in this message \u2014 duplicated content', dupSample);
+
+        return out;
+    }
+
+    // Cross-message pass: shape drift can only be judged against the rest of the chat.
+    function scanChatStructure(chat) {
+        const list = Array.isArray(chat) ? chat : [];
+        const rows = [];
+        const shapeCount = new Map();   // label -> Map(fieldKey -> count)
+        const perMsg = [];
+
+        for (let i = 0; i < list.length; i++) {
+            const m = list[i];
+            if (!m) continue;
+            const text = String(m.mes || '');
+            const findings = scanMessageStructure(text);
+            const shapes = blockShapes(text);
+            perMsg.push({ i, shapes });
+            for (const sh of shapes) {
+                const key = sh.label.toLowerCase();
+                if (!shapeCount.has(key)) shapeCount.set(key, new Map());
+                const inner = shapeCount.get(key);
+                const fk = sh.fields.join('|');
+                inner.set(fk, (inner.get(fk) || 0) + 1);
+            }
+            if (findings.length) rows.push({ id: i, who: m.is_user ? 'USER' : (m.name || 'AI'), findings });
+        }
+
+        // Modal shape per label; a deviation is only reported when the norm is
+        // actually established (3+ messages agree), so a young chat is never nagged.
+        const modal = new Map();
+        for (const [label, inner] of shapeCount) {
+            let best = null, bestN = 0, total = 0;
+            for (const [fk, n] of inner) { total += n; if (n > bestN) { bestN = n; best = fk; } }
+            if (bestN >= 3 && total > bestN) modal.set(label, { fields: best, n: bestN });
+        }
+        for (const pm of perMsg) {
+            for (const sh of pm.shapes) {
+                const norm = modal.get(sh.label.toLowerCase());
+                if (!norm) continue;
+                const fk = sh.fields.join('|');
+                if (fk === norm.fields) continue;
+                const want = norm.fields ? norm.fields.split('|') : [];
+                const missing = want.filter(f => !sh.fields.includes(f));
+                const extra = sh.fields.filter(f => !want.includes(f));
+                if (!missing.length && !extra.length) continue;
+                const row = rows.find(r => r.id === pm.i) || (rows.push({ id: pm.i, who: 'AI', findings: [] }), rows[rows.length - 1]);
+                row.findings.push({
+                    code: 'field-shape',
+                    detail: 'the "' + sh.label + '" block does not match the shape used by ' + norm.n + ' other message(s)'
+                        + (missing.length ? ' \u2014 MISSING: ' + missing.join(', ') : '')
+                        + (extra.length ? ' \u2014 EXTRA: ' + extra.join(', ') : ''),
+                    excerpt: '',
+                });
+            }
+        }
+        rows.sort((a, b) => a.id - b.id);
+        return rows;
+    }
+
+    function formatStructureFlags(rows) {
+        return rows.map(r => '#' + r.id + ' [' + r.who + ']\n'
+            + r.findings.map(f => '    - [' + f.code + '] ' + f.detail + (f.excerpt ? '\n        text: \u201C' + f.excerpt + '\u201D' : '')).join('\n')
+        ).join('\n');
     }
 
     // Open SOURCE-level continuity flags from Summaryception's auditor (guarded: returns ''
@@ -1524,7 +1853,7 @@
         const rule = settings.allowUserEdits
             ? 'You may edit user-authored messages when the user asks for it.'
             : 'Never propose edits to user-authored messages; they are read-only.';
-        let out = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + BEHAVIOR_RULES + '\n\n' + CHAT_EDIT_EXTRAS + '\n\n' + MEMEDIT_RULES;
+        let out = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + BEHAVIOR_RULES + '\n\n' + MESSAGE_TEXT_RULES + '\n\n' + CHAT_EDIT_EXTRAS + '\n\n' + MEMEDIT_RULES;
         if (wiCanEdit()) out += '\n\n' + WI_RULES;
         return out;
     }
@@ -1712,16 +2041,29 @@
         return low.indexOf('</' + tag + '>', o) === -1;
     }
 
+    // Ids beyond the per-round cap used to be dropped by a bare .slice(0, 15): the
+    // model asked for 20 messages, got 15, and was never told which 5 it never saw.
+    // Silent short-serving is the same class of bug as silent truncation, so the
+    // overflow is now RETURNED and reported back to the model.
+    const FETCH_REF_CAP = 30;
     function parseFetch(text) {
         const b = findBlock(text, 'fetch');
         if (!b) return null;
         const m = b.inner.match(/\[[\s\S]*?\]/);
         if (!m) return null;
         try {
-            const arr = JSON.parse(m[0]);
+            const arr = parseJsonLoose(m[0]);
             if (!Array.isArray(arr)) return null;
-            const ids = arr.map(Number).filter(n => Number.isInteger(n) && n >= 0).slice(0, 15);
-            return ids.length ? ids : null;
+            const all = [];
+            const seen = new Set();
+            for (const x of arr) {
+                const r = parseMsgRef(x);
+                if (!r || seen.has(refKey(r))) continue;
+                seen.add(refKey(r));
+                all.push(r);
+            }
+            if (!all.length) return null;
+            return { refs: all.slice(0, FETCH_REF_CAP), dropped: all.slice(FETCH_REF_CAP) };
         } catch (e) { return null; }
     }
 
@@ -2951,7 +3293,10 @@
             const isWholeReplace = (e.find == null && typeof e.replace === 'string'); // rewriting the whole message blind is even riskier than a find that just fails
             if (isFindEdit || isWholeReplace) ids.push(e.id);
         }
-        return [...new Set(ids)].filter(id => id < winStart && !(fetchedIds && fetchedIds.has && fetchedIds.has(id)));
+        // "Fetched" only counts when the copy served was the WHOLE message: a part
+        // is not a read, and a find copied out of a slice is as blind as one invented.
+        return [...new Set(ids)].filter(id => (id < winStart || !msgServedWhole(id))
+            && !(fetchedIds && fetchedIds.has && fetchedIds.has(id)));
     }
 
     // ------------------------------------------------------------------
@@ -3005,6 +3350,14 @@
         }
         if (/^#d$/i.test(userText)) {
             toast('Usage: #d your direction \u2014 e.g. "#d make Silas corner Jovan at the duel field this episode"', 'info');
+            return;
+        }
+        const mm = userText.match(/^#m\b\s*([\s\S]*)$/i);
+        if (mm) {
+            addBubble('user', userText);
+            const arg = mm[1].trim();
+            pushHistory('note', '\uD83D\uDD0E Deep audit started' + (arg ? ' \u2014 ' + arg.slice(0, 200) : ''));
+            await runDeepAudit(arg);
             return;
         }
         const sm = userText.match(/^#e\s+([\s\S]+)$/i);
@@ -3069,7 +3422,8 @@
             let reply = '';
             let think = '';
             const rounds = numSetting(settings.fetchRounds, defaults.fetchRounds, 0, 6);
-            const fetchedIds = new Set();
+            const fetchedIds = new Set();    // ids served WHOLE
+            const fetchedRefs = new Set();   // id#part keys actually served
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
                 const split = await callLLMSmart(messages, live);
@@ -3112,16 +3466,20 @@
                         continue;
                     }
                 }
-                const ids = parseFetch(reply);
-                if (!ids || round === rounds) break;
-                const fresh = ids.filter(x => !fetchedIds.has(Number(x)));
-                ids.forEach(x => fetchedIds.add(Number(x)));
+                const req = parseFetch(reply);
+                if (!req || round === rounds) break;
+                const fresh = req.refs.filter(r => !fetchedRefs.has(refKey(r)));
+                req.refs.forEach(r => {
+                    fetchedRefs.add(refKey(r));
+                    if (msgServedWhole(r.id)) fetchedIds.add(r.id);   // only a WHOLE copy counts as read
+                });
                 messages.push({ role: 'assistant', content: reply });
                 if (fresh.length) {
-                    const note = 'Assistant read full text of #' + fresh.join(', #') + ' (fetch ' + (round + 1) + '/' + rounds + ')' + (fresh.length < ids.length ? ' \u2014 skipped ' + (ids.length - fresh.length) + ' already-fetched' : '');
+                    const note = 'Assistant read full text of #' + fresh.map(r => r.part > 1 ? (r.id + ' part ' + r.part) : r.id).join(', #') + ' (fetch ' + (round + 1) + '/' + rounds + ')' + (fresh.length < req.refs.length ? ' \u2014 skipped ' + (req.refs.length - fresh.length) + ' already-fetched' : '');
                     addBubble('note', note);
                     pushHistoryTo(sessObj, 'note', note);
                     let payload = '[FETCHED MESSAGES]\n' + fullTextOf(fresh);
+                    if (req.dropped.length) payload += '\n\n(\u26A0 ' + req.dropped.length + ' id(s) in that request were NOT served \u2014 a fetch round carries at most ' + FETCH_REF_CAP + '. Not served: #' + req.dropped.map(r => r.id).join(', #') + '. Fetch them in a later round; do not assume you have seen them.)';
                     if (round === rounds - 1) payload += '\n\n(This was your final fetch \u2014 produce your complete answer now; further fetch requests will not be served.)';
                     messages.push({ role: 'user', content: payload });
                 } else {
@@ -3131,7 +3489,7 @@
                     messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n(All requested ids were already provided earlier in this conversation \u2014 re-read them above instead of re-fetching. If you need DIFFERENT messages, fetch those; otherwise produce your complete final answer.)' });
                 }
             }
-            const exhausted = parseFetch(reply);
+            const exhausted = !!parseFetch(reply);
 
             busy.remove();
             if (!sameChat(chatAt)) {
@@ -3179,84 +3537,7 @@
                 pushHistoryTo(sessObj, 'note', twarn);
             }
 
-            const parsed = parseEdits(reply);
-            const parsedMem = parseMemEdits(reply);
-            if (parsed.error) addBubble('note', 'Edit block error: ' + parsed.error + ' — ask the copilot to resend valid JSON.');
-            if (parsedMem.error) addBubble('note', 'Memory edit block error: ' + parsedMem.error + ' — ask the copilot to resend valid JSON.');
-            let parsedWi = { edits: [] };
-            if (wiCanEdit()) {
-                parsedWi = parseWiEdits(reply);
-                if (parsedWi.error) addBubble('note', 'Worldbook edit block error: ' + parsedWi.error + ' \u2014 ask the copilot to resend valid JSON.');
-            } else if (findBlock(reply, 'wiedits')) {
-                // Editing needs the WI API + a bound book. Say exactly which is missing.
-                const why = !wiApiAvailable() ? 'this SillyTavern build does not expose the World Info API (loadWorldInfo / saveWorldInfo)'
-                    : 'no lorebook is selected \u2014 open/activate a World Info book in SillyTavern, or set one in Chat Assistant\u2019s Worldbook settings';
-                addBubble('note', '\u26A0 The assistant proposed Worldbook changes, but nothing was staged because ' + why + '. Fix that and ask again.');
-            }
-            const allEdits = [...parsed.edits, ...parsedMem.edits, ...parsedWi.edits];
-            let didSupersede = 0;
-            const supersedeLabels = parseSupersede(reply);
-            if (supersedeLabels.length && pendingEdits.length) {
-                const labeledNow = labelForEdits(pendingEdits);
-                for (const lbl of supersedeLabels) {
-                    const norm = lbl.trim().toLowerCase();
-                    const hit = labeledNow.find(x => x.label.toLowerCase() === norm);
-                    if (hit) { if (hit.edit.kind === 'wi') hit.edit.editStatus = 'skipped'; else hit.edit.status = 'skipped'; didSupersede++; }
-                }
-            }
-            if (allEdits.length) {
-                editsCollapsed = false;
-                // Merge exact duplicates the model emitted twice in the SAME reply.
-                const seenSigs = new Set();
-                const uniqueNew = [];
-                let intraDups = 0;
-                for (const e of allEdits) {
-                    const s = editSig(e);
-                    if (seenSigs.has(s)) { intraDups++; continue; }
-                    seenSigs.add(s);
-                    uniqueNew.push(e);
-                }
-                // Auto-supersede: if the user asked again without applying, the model
-                // re-sends (or refines) the same fixes. Applying both copies would make
-                // the second fail — its anchor is consumed by the first — so the OLD
-                // pending card is skipped deterministically; no reliance on the model
-                // remembering to emit a <supersede> block.
-                let autoSup = 0;
-                for (const oldE of pendingEdits) {
-                    const stOld = oldE.kind === 'wi' ? oldE.editStatus : oldE.status;
-                    const wasFailed = typeof stOld === 'string' && stOld.indexOf('failed') === 0;
-                    if (stOld !== 'pending' && !wasFailed) continue;
-                    if (oldE.edited) continue; // never auto-skip a card the user hand-edited
-                    // Pending cards: superseded by an identical re-proposal or a refinement.
-                    // FAILED cards: superseded by ANY new proposal to the same concrete
-                    // target — the model was coached to re-propose them corrected, and a
-                    // corrected version has a different anchor by definition, so the
-                    // anchor-equality rule can never match. Either way the failed card is
-                    // dead weight once a successor exists.
-                    const hit = uniqueNew.some(nE => wasFailed ? sameConcreteTarget(oldE, nE) : supersededByNew(oldE, nE));
-                    if (hit) {
-                        const tag = wasFailed ? 'skipped \u2014 replaced after failing' : 'skipped \u2014 superseded by the newest batch';
-                        if (oldE.kind === 'wi') oldE.editStatus = tag;
-                        else oldE.status = tag;
-                        autoSup++;
-                    }
-                }
-                stampReviewState(uniqueNew);
-                const batchNo = (pendingEdits.reduce((mx, e) => Math.max(mx, e.batch || 0), 0)) + 1;
-                uniqueNew.forEach(e => { e.batch = batchNo; });
-                if (pendingEdits.length) {
-                    pendingEdits = pendingEdits.concat(uniqueNew);
-                    let msg = '\u2795 ' + uniqueNew.length + ' new proposal(s) added below your still-pending one(s).';
-                    if (autoSup) msg += ' ' + autoSup + ' older duplicate(s) auto-skipped \u2014 "Apply all" applies only the newest version of each fix.';
-                    if (intraDups) msg += ' (' + intraDups + ' duplicate(s) within the reply merged.)';
-                    addBubble('note', msg + ' Review all together, or Dismiss to clear.');
-                } else {
-                    pendingEdits = uniqueNew;
-                    if (intraDups) addBubble('note', intraDups + ' duplicate proposal(s) within the reply merged.');
-                }
-            }
-            if (didSupersede) addBubble('note', '\u21A9 Auto-skipped ' + didSupersede + ' proposal(s) the assistant replaced \u2014 "Apply all" will ignore them.');
-            if (allEdits.length || didSupersede) renderEditCards();
+            ingestProposals(reply);
         } catch (err) {
             busy.remove();
             console.error(LOG, err);
@@ -3266,6 +3547,302 @@
             running = false;
             setBusy(false);
             releaseAutoDirectorRetry();
+        }
+    }
+
+    // Everything a reply can PROPOSE, turned into staged cards. Extracted from
+    // runGeneration in v2.72 so the deep audit stages proposals through exactly the
+    // same path — dedupe, auto-supersede, review stamping and batching included.
+    // A second copy of this logic would have drifted from the first within a release.
+    function ingestProposals(reply) {
+        const parsed = parseEdits(reply);
+        const parsedMem = parseMemEdits(reply);
+        if (parsed.error) addBubble('note', 'Edit block error: ' + parsed.error + ' — ask the copilot to resend valid JSON.');
+        if (parsedMem.error) addBubble('note', 'Memory edit block error: ' + parsedMem.error + ' — ask the copilot to resend valid JSON.');
+        let parsedWi = { edits: [] };
+        if (wiCanEdit()) {
+            parsedWi = parseWiEdits(reply);
+            if (parsedWi.error) addBubble('note', 'Worldbook edit block error: ' + parsedWi.error + ' \u2014 ask the copilot to resend valid JSON.');
+        } else if (findBlock(reply, 'wiedits')) {
+            // Editing needs the WI API + a bound book. Say exactly which is missing.
+            const why = !wiApiAvailable() ? 'this SillyTavern build does not expose the World Info API (loadWorldInfo / saveWorldInfo)'
+                : 'no lorebook is selected \u2014 open/activate a World Info book in SillyTavern, or set one in Chat Assistant\u2019s Worldbook settings';
+            addBubble('note', '\u26A0 The assistant proposed Worldbook changes, but nothing was staged because ' + why + '. Fix that and ask again.');
+        }
+        const allEdits = [...parsed.edits, ...parsedMem.edits, ...parsedWi.edits];
+        let didSupersede = 0;
+        const supersedeLabels = parseSupersede(reply);
+        if (supersedeLabels.length && pendingEdits.length) {
+            const labeledNow = labelForEdits(pendingEdits);
+            for (const lbl of supersedeLabels) {
+                const norm = lbl.trim().toLowerCase();
+                const hit = labeledNow.find(x => x.label.toLowerCase() === norm);
+                if (hit) { if (hit.edit.kind === 'wi') hit.edit.editStatus = 'skipped'; else hit.edit.status = 'skipped'; didSupersede++; }
+            }
+        }
+        if (allEdits.length) {
+            editsCollapsed = false;
+            // Merge exact duplicates the model emitted twice in the SAME reply.
+            const seenSigs = new Set();
+            const uniqueNew = [];
+            let intraDups = 0;
+            for (const e of allEdits) {
+                const s = editSig(e);
+                if (seenSigs.has(s)) { intraDups++; continue; }
+                seenSigs.add(s);
+                uniqueNew.push(e);
+            }
+            // Auto-supersede: if the user asked again without applying, the model
+            // re-sends (or refines) the same fixes. Applying both copies would make
+            // the second fail — its anchor is consumed by the first — so the OLD
+            // pending card is skipped deterministically; no reliance on the model
+            // remembering to emit a <supersede> block.
+            let autoSup = 0;
+            for (const oldE of pendingEdits) {
+                const stOld = oldE.kind === 'wi' ? oldE.editStatus : oldE.status;
+                const wasFailed = typeof stOld === 'string' && stOld.indexOf('failed') === 0;
+                if (stOld !== 'pending' && !wasFailed) continue;
+                if (oldE.edited) continue; // never auto-skip a card the user hand-edited
+                // Pending cards: superseded by an identical re-proposal or a refinement.
+                // FAILED cards: superseded by ANY new proposal to the same concrete
+                // target — the model was coached to re-propose them corrected, and a
+                // corrected version has a different anchor by definition, so the
+                // anchor-equality rule can never match. Either way the failed card is
+                // dead weight once a successor exists.
+                const hit = uniqueNew.some(nE => wasFailed ? sameConcreteTarget(oldE, nE) : supersededByNew(oldE, nE));
+                if (hit) {
+                    const tag = wasFailed ? 'skipped \u2014 replaced after failing' : 'skipped \u2014 superseded by the newest batch';
+                    if (oldE.kind === 'wi') oldE.editStatus = tag;
+                    else oldE.status = tag;
+                    autoSup++;
+                }
+            }
+            stampReviewState(uniqueNew);
+            const batchNo = (pendingEdits.reduce((mx, e) => Math.max(mx, e.batch || 0), 0)) + 1;
+            uniqueNew.forEach(e => { e.batch = batchNo; });
+            if (pendingEdits.length) {
+                pendingEdits = pendingEdits.concat(uniqueNew);
+                let msg = '\u2795 ' + uniqueNew.length + ' new proposal(s) added below your still-pending one(s).';
+                if (autoSup) msg += ' ' + autoSup + ' older duplicate(s) auto-skipped \u2014 "Apply all" applies only the newest version of each fix.';
+                if (intraDups) msg += ' (' + intraDups + ' duplicate(s) within the reply merged.)';
+                addBubble('note', msg + ' Review all together, or Dismiss to clear.');
+            } else {
+                pendingEdits = uniqueNew;
+                if (intraDups) addBubble('note', intraDups + ' duplicate proposal(s) within the reply merged.');
+            }
+        }
+        if (didSupersede) addBubble('note', '\u21A9 Auto-skipped ' + didSupersede + ' proposal(s) the assistant replaced \u2014 "Apply all" will ignore them.');
+        if (allEdits.length || didSupersede) renderEditCards();
+    }
+
+
+    // ------------------------------------------------------------------
+    // Deep audit runner
+    // ------------------------------------------------------------------
+    // Four passes over the WHOLE story, not a sample: structure (in code), chat vs
+    // memory across every window of the log, memory vs itself, memory vs the
+    // originals it claims to summarize. Progress is chat-scoped and resumable, so a
+    // Stop or a closed tab never means starting over, and no pass ever hands the
+    // user a "tell me where to continue" \u2014 the extension knows where it is.
+    function auditState() {
+        const r = metaRoot();
+        if (!r.audit || typeof r.audit !== 'object') r.audit = { phase: 'structure', cursor: 0, ts: 0 };
+        if (typeof r.audit.cursor !== 'number' || r.audit.cursor < 0) r.audit.cursor = 0;
+        return r.audit;
+    }
+
+    async function auditAsk(systemTexts, userText, rounds, tick) {
+        const messages = systemTexts.filter(Boolean).map(t => ({ role: 'system', content: t }));
+        messages.push({ role: 'user', content: userText });
+        let reply = '';
+        for (let round = 0; round <= rounds; round++) {
+            if (stopRequested) break;
+            const sp = await callLLMSmart(messages, tick ? tick.onPartial : undefined);
+            reply = (sp && sp.rest) ? sp.rest : '';
+            const req = parseFetch(reply);
+            if (!req || round === rounds) break;
+            messages.push({ role: 'assistant', content: reply });
+            messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(req.refs, 0) });
+        }
+        return reply;
+    }
+
+    // Split a long memory blob on its own section headers, then pack sections into
+    // budgeted chunks. Deterministic: the same memory always chunks the same way.
+    function chunkMemory(text, budget) {
+        const t = String(text || '');
+        if (!t.trim()) return [];
+        const parts = t.split(/\n(?=--- (?:memory|injection|Author's Note)[^\n]*---)/);
+        const out = [];
+        let cur = '';
+        for (const p of parts) {
+            if (cur && (cur.length + p.length) > budget) { out.push(cur); cur = p; }
+            else cur = cur ? (cur + '\n' + p) : p;
+            while (cur.length > budget * 2) { out.push(cur.slice(0, budget * 2)); cur = cur.slice(budget * 2); }
+        }
+        if (cur.trim()) out.push(cur);
+        return out;
+    }
+
+    async function runDeepAudit(rawExtra) {
+        if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
+        const c = ctx();
+        if (!Array.isArray(c.chat) || !c.chat.length) { toast('No chat is loaded.', 'warning'); return; }
+
+        const extra = String(rawExtra || '').trim();
+        const wantRestart = /\b(restart|fresh|again|all)\b/i.test(extra);
+        const structureOnly = /\bstructure\b/i.test(extra);
+        const fromM = extra.match(/\bfrom\s*#?(\d+)/i);
+        const userNote = extra.replace(/\b(restart|fresh|again|all|structure)\b/ig, '').replace(/\bfrom\s*#?\d+/ig, '').trim();
+        const extraLine = userNote ? '\n\nAdditional instruction from the user (applies to this whole audit): ' + userNote : '';
+
+        beginRun();
+        const chatAt = chatRef();
+        const sessObj = meta();
+        const busy = addBubble('busy', 'deep audit \u2014 starting\u2026');
+        const tick = busyTicker(busy, 'deep audit');
+        const report = [];
+        let calls = 0;
+        const note = (t) => { addBubble('note', t); pushHistoryTo(sessObj, 'note', t); };
+        const alive = () => {
+            if (stopRequested) return false;
+            if (!sameChat(chatAt)) return false;
+            return true;
+        };
+
+        try {
+            const chat = ctx().chat || [];
+            const st = auditState();
+            if (wantRestart || fromM) { st.cursor = fromM ? Math.min(chat.length - 1, Math.max(0, Number(fromM[1]))) : 0; st.phase = 'structure'; }
+            const resumed = !wantRestart && !fromM && st.cursor > 0;
+
+            // ---------------- PASS 1: structure (code first, model second) -------------
+            tick.phase('deep audit \u00b7 scanning structure');
+            const rows = scanChatStructure(chat);
+            const flagged = rows.length;
+            if (!flagged) {
+                note('\u2705 Structure: ' + chat.length + ' message(s) scanned \u2014 every machine block balanced, unique, and in the shape the rest of the chat uses.');
+                report.push('STRUCTURE: clean across all ' + chat.length + ' messages.');
+            } else {
+                note('\uD83D\uDD0E Structure: ' + flagged + ' message(s) carry provable faults \u2014 #' + rows.map(r => r.id).join(', #'));
+                report.push('STRUCTURE: ' + flagged + ' message(s) flagged.\n' + formatStructureFlags(rows));
+                for (let k = 0; k < rows.length; k += 3) {
+                    if (!alive()) break;
+                    const batch = rows.slice(k, k + 3);
+                    tick.phase('deep audit \u00b7 structure ' + Math.min(k + 3, rows.length) + '/' + rows.length);
+                    const reply = await auditAsk([
+                        sysPrompt(),
+                        '[STRUCTURE FLAGS \u2014 proven by a code scan; treat as fact]\n' + formatStructureFlags(batch),
+                        '[MESSAGES UNDER AUDIT]\n' + fullTextOf(batch.map(r => r.id), 0),
+                    ], AUDIT_STRUCTURE_PROMPT + extraLine, 0, tick);
+                    calls++;
+                    if (!alive()) break;
+                    ingestProposals(reply);
+                    const prose = stripBlocks(reply).trim();
+                    if (prose) report.push('STRUCTURE #' + batch.map(r => r.id).join(', #') + ':\n' + prose);
+                }
+            }
+
+            // ---------------- PASS 2: continuity, window by window ---------------------
+            if (!structureOnly && alive()) {
+                const win = numSetting(settings.auditWindow, defaults.auditWindow, 2, 40);
+                const rounds = numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4);
+                const memText = gatherMemory();
+                const total = Math.max(1, Math.ceil((chat.length - st.cursor) / win));
+                if (resumed) note('\u21BB Resuming the continuity sweep from #' + st.cursor + ' (a previous run stopped there).');
+                let done = 0;
+                for (let start = st.cursor; start < chat.length; start += win) {
+                    if (!alive()) break;
+                    const end = Math.min(chat.length - 1, start + win - 1);
+                    done++;
+                    tick.phase('deep audit \u00b7 continuity #' + start + '\u2013#' + end + ' (' + done + '/' + total + ')');
+                    const ids = [];
+                    for (let i = start; i <= end; i++) ids.push(i);
+                    const ribIds = [];
+                    for (let i = Math.max(0, start - 2); i < start; i++) ribIds.push(i);
+                    const reply = await auditAsk([
+                        sysPrompt(),
+                        '[STORY MEMORY]\n' + memText,
+                        ribIds.length ? '[CONTEXT RIBBON \u2014 already audited, do not re-report]\n' + fullTextOf(ribIds, 0) : '',
+                        '[MESSAGES UNDER AUDIT \u2014 #' + start + ' to #' + end + ']\n' + fullTextOf(ids, 0),
+                    ], AUDIT_CONTINUITY_PROMPT + extraLine, rounds, tick);
+                    calls++;
+                    if (!alive()) break;
+                    ingestProposals(reply);
+                    const prose = stripBlocks(reply).trim();
+                    if (prose && !/^WINDOW CLEAN\.?$/i.test(prose)) report.push('CONTINUITY #' + start + '\u2013#' + end + ':\n' + prose);
+                    st.cursor = end + 1;
+                    st.ts = Date.now();
+                    saveMeta();
+                }
+                if (st.cursor >= chat.length) { st.cursor = 0; saveMeta(); }
+            }
+
+            // ---------------- PASS 3: memory against itself ----------------------------
+            if (!structureOnly && alive()) {
+                const memText = gatherMemory();
+                const chunks = chunkMemory(memText, 24000);
+                if (!chunks.length) {
+                    note('Memory pass skipped \u2014 no memory-extension data is visible in this chat.');
+                } else {
+                    for (let k = 0; k < chunks.length; k++) {
+                        if (!alive()) break;
+                        tick.phase('deep audit \u00b7 memory ' + (k + 1) + '/' + chunks.length);
+                        const reply = await auditAsk([
+                            sysPrompt(),
+                            '[STORY MEMORY' + (chunks.length > 1 ? ' \u2014 section ' + (k + 1) + ' of ' + chunks.length : '') + ']\n' + chunks[k],
+                        ], AUDIT_MEMORY_PROMPT + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
+                        calls++;
+                        if (!alive()) break;
+                        ingestProposals(reply);
+                        const prose = stripBlocks(reply).trim();
+                        if (prose && !/^MEMORY CONSISTENT\.?$/i.test(prose)) report.push('MEMORY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+                    }
+                }
+            }
+
+            // ---------------- PASS 4: fidelity to the originals ------------------------
+            if (!structureOnly && alive()) {
+                const memText = gatherMemory();
+                const chunks = chunkMemory(memText, 12000);
+                for (let k = 0; k < chunks.length; k++) {
+                    if (!alive()) break;
+                    tick.phase('deep audit \u00b7 fidelity ' + (k + 1) + '/' + chunks.length);
+                    const reply = await auditAsk([
+                        sysPrompt(),
+                        '[MESSAGE INDEX]\n' + buildIndex(),
+                        '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
+                    ], AUDIT_FIDELITY_PROMPT + extraLine, Math.max(2, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
+                    calls++;
+                    if (!alive()) break;
+                    ingestProposals(reply);
+                    const prose = stripBlocks(reply).trim();
+                    if (prose && !/^SECTION FAITHFUL\.?$/i.test(prose)) report.push('FIDELITY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+                }
+            }
+
+            // ---------------- verdict --------------------------------------------------
+            const stopped = stopRequested;
+            const switched = !sameChat(chatAt);
+            if (switched) {
+                addBubble('note', 'Chat changed mid-audit \u2014 the remaining passes were dropped and nothing was written to the new chat.');
+                return;
+            }
+            const head = (stopped ? '\u23F9 Deep audit STOPPED early' : '\u2705 Deep audit complete')
+                + ' \u2014 ' + calls + ' model call(s), ' + chat.length + ' message(s) scanned in code'
+                + (stopped ? '. It resumes from #' + auditState().cursor + ' next time you run #m.' : '.');
+            const body = report.length ? report.join('\n\n') : 'Nothing to report: no structural faults, no continuity contradictions, no memory conflicts found.';
+            pushHistoryTo(sessObj, 'assistant', head + '\n\n' + body);
+            renderHistory();
+        } catch (err) {
+            console.error(LOG, err);
+            addBubble('note', 'Deep audit error: ' + (err && err.message ? err.message : err));
+            toast(String(err && err.message ? err.message : err), 'error');
+        } finally {
+            tick.stop();
+            busy.remove();
+            running = false;
+            setBusy(false);
         }
     }
 
@@ -4189,6 +4766,8 @@
             '<div class="cc_row">',
             '  <div><label>Recent msgs sent in full</label><input type="number" id="cc_recent" min="0" max="100"></div>',
             '  <div><label>Fetch rounds</label><input type="number" id="cc_rounds" min="0" max="6"></div>',
+            '  <div><label>Message text cap (0 = whole message)</label><input type="number" id="cc_textcap" min="0" max="200000"></div>',
+            '  <div><label>Deep audit window (msgs/pass)</label><input type="number" id="cc_auditwin" min="2" max="40"></div>',
             '  <div><label>Max output tokens</label><input type="number" id="cc_maxtok" min="256" max="32768" step="256"></div>',
             '  <div><label>LLM stall timeout (s, 0 = off)</label><input type="number" id="cc_llm_timeout" min="0" max="3600" step="30"></div>',
             '</div>',
@@ -4200,7 +4779,7 @@
             '<div class="cc_check"><input type="checkbox" id="cc_stream"><span>Streaming (needs a Connection Profile)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_showthink"><span>Show thinking blocks</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_userok"><span>Allow editing my (user) messages</span></div>',
-            '<div class="cc_check"><input type="checkbox" id="cc_hidden"><span>Full text previews for hidden/ghosted in index (token heavy; off = one-line stubs)</span></div>',
+            '<div class="cc_check"><input type="checkbox" id="cc_hidden"><span>Show a 150-character preview of hidden/ghosted messages in the index (off = id + tag only)</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_rehide"><span>Auto re-hide pilot-hidden messages when a chat/branch loads</span></div>',
             '<div class="cc_check"><input type="checkbox" id="cc_an"><span>Include Author\'s Note in story memory</span></div>',
             '<div style="margin:10px 0 2px;font-weight:600;opacity:0.75;">Director & Editor</div>',
@@ -4249,6 +4828,8 @@
 
         el('cc_recent').value = settings.recentFull;
         el('cc_rounds').value = settings.fetchRounds;
+        el('cc_textcap').value = settings.fullTextCap;
+        el('cc_auditwin').value = settings.auditWindow;
         el('cc_maxtok').value = settings.maxTokens;
         el('cc_llm_timeout').value = Number.isFinite(Number(settings.llmTimeoutSec)) ? settings.llmTimeoutSec : 300;
         el('cc_think_retries').value = Number.isFinite(Number(settings.thinkRetries)) ? settings.thinkRetries : 2;
@@ -4282,6 +4863,8 @@
             settings.profileId = el('cc_profile').value;
             settings.recentFull = numSetting(el('cc_recent').value, defaults.recentFull, 0, 100);
             settings.fetchRounds = numSetting(el('cc_rounds').value, defaults.fetchRounds, 0, 6);
+            settings.fullTextCap = numSetting(el('cc_textcap').value, defaults.fullTextCap, 0, 200000);
+            settings.auditWindow = numSetting(el('cc_auditwin').value, defaults.auditWindow, 2, 40);
             settings.maxTokens = numSetting(el('cc_maxtok').value, defaults.maxTokens, 256, 32768);
             settings.llmTimeoutSec = numSetting(el('cc_llm_timeout').value, defaults.llmTimeoutSec, 0, 3600);
             settings.thinkRetries = numSetting(el('cc_think_retries').value, defaults.thinkRetries, 0, 99);
