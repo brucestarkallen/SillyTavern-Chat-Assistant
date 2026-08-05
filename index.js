@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.73.0';
+    const VERSION = '2.74.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -137,7 +137,7 @@
     const BRIEF_SHORTCUT = '#br = Write a short handoff paragraph for a fresh storyteller: where the story stands and what is in motion. Prose only, no edits.';
     const OPTIMIZE_SHORTCUT = '#opt = MEMORY OPTIMIZE \u2014 zero-loss token reduction of the memory, section by section (aggregation, reference stripping, dialogue-surround and texture compression, causal notation), with a mandatory zero-loss verification before anything is proposed. Never touches the notepad or a pinned quote. Nothing changes until you press Apply.';
     const CLEANUP_SHORTCUT = '#cl = MEMORY CLEANUP \u2014 the showrunner pass for a cluttered story: throughline, cold-read test, broken coherence, what is missing, motivation check, then a SPINE / SUPPORT / TEXTURE / NOISE manifest. Subtractive proposals only; restructuring is described and waits for your go-ahead.';
-    const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself; (4) FIDELITY of each memory section to the originals it covers. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point). It resumes where a stopped run left off.';
+    const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself; (4) VERIFY \u2014 pulls the ORIGINAL ghosted messages, but only the ones pass 3 could not settle on its own. Only VISIBLE messages are swept \u2014 ghosted ones are already in the memory, and their originals are fetched only where something looks wrong. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point), "#m ghosted" (also repair broken blocks inside ghosted messages). It resumes where a stopped run left off.';
     const LEGACY_M_SHORTCUT = '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.';
     const PSYCH_SHORTCUT = '#p = Analyze the psychology of the character I name (or the most active one if none is named). Use only [STORY MEMORY] and the chat. Cover: (1) core drives, fears, and formative wounds as established in canon; (2) internal contradictions in how the character is written; (3) consistency: does recent behavior match the established characterization? Flag any out-of-character drift, citing the specific turns; (4) what the character would plausibly do next under the current pressure, and what would ring false. Ground every claim in something concrete. Do not propose edits unless I ask.';
     const DEFAULT_SHORTCUTS = [
@@ -191,8 +191,9 @@
     ].join('\n');
 
     const AUDIT_CONTINUITY_PROMPT = [
-        'DEEP AUDIT \u2014 PASS 2 of 4: CONTINUITY, over this window of the chat.',
+        'DEEP AUDIT \u2014 PASS 2 of 4: CONTINUITY, over this window of the VISIBLE chat.',
         'Audit ONLY the messages under audit (the ribbon above them is context that was already audited). They are served COMPLETE.',
+        'Older events are ghosted into [STORY MEMORY] rather than shown here \u2014 that is normal and is NOT a gap to report. If settling a contradiction needs the original wording of a ghosted message, <fetch> that id; do not guess and do not report the absence.',
         'Against [STORY MEMORY] and the ribbon, find: wrong locations, wrong time of day or elapsed time, characters present who are elsewhere or absent who should be there, knowledge a character could not have (who witnessed what), objects/injuries/promises that appear or vanish, contradicted names, titles, numbers, and state that the memory records differently.',
         'Report only REAL contradictions, each with the message id and the two things that disagree. If the window is clean, say exactly: WINDOW CLEAN.',
         'Fix chat-side errors with <edits> (find copied verbatim from the text above). Where the MEMORY is the wrong one, fix it with <memedits> instead. Do not rewrite prose for style, only for truth.',
@@ -204,13 +205,17 @@
         'The NOTEPAD is the exception: it records the OPENING state on purpose. Later events outgrowing it is progression, not a contradiction — do not "update", "refresh" or reconcile it, and do not report it. Touch it only for a contradiction internal to the notepad itself.',
         'Where two versions disagree, <fetch> the original messages to decide which is true before proposing anything.',
         'Propose corrections in a single <memedits> block, "find" copied character-for-character from [STORY MEMORY]. If the memory is internally consistent, say exactly: MEMORY CONSISTENT.',
+        'Then, SEPARATELY, list every message you would need to READ to settle a doubt you could not resolve from the memory alone \u2014 a snippet that looks wrong, thin, self-contradicting, or that records something the ledger denies. Use the snippet\'s own "(covers chat messages #x to #y)" note to name them:',
+        '<verify>[41, "58-63"]</verify>',
+        'Name ONLY what you actually doubt. An empty list is the right answer for a memory that checks out \u2014 those originals are ghosted, and pulling them costs the user real time.',
     ].join('\n');
 
-    const AUDIT_FIDELITY_PROMPT = [
-        'DEEP AUDIT \u2014 PASS 4 of 4: FIDELITY of the memory to what actually happened.',
-        'For the memory section below, use its "(covers chat messages #x to #y)" notes to <fetch> the original messages, then verify two things: does the snippet capture every plot-relevant event, and does its audit/detail field preserve the concrete facts (names, numbers, objects, places, injuries, promises, who-knows-what)?',
-        'Report anything LOST or DISTORTED and restore it with <memedits> into the snippet text or its detail field. Never delete detail to make it shorter.',
-        'If this section is faithful, say exactly: SECTION FAITHFUL.',
+    const AUDIT_VERIFY_PROMPT = [
+        'DEEP AUDIT \u2014 PASS 4 of 4: VERIFY THE DOUBTS.',
+        'The previous pass could not settle these from the memory alone, so the ORIGINAL messages behind them have been pulled and are served COMPLETE below \u2014 most are ghosted, and this is the only place they get read.',
+        'Against the originals, settle each doubt: does the memory record what actually happened? Is every concrete fact preserved (names, numbers, objects, places, injuries, promises, who-knows-what)? Was anything load-bearing LOST or DISTORTED in the summarizing?',
+        'Repair the MEMORY with <memedits> \u2014 restore what was lost into the snippet text or its detail field, correct what was distorted, and never delete detail to make it shorter. Repair the MESSAGE with <edits> only when the original itself is the thing that is wrong.',
+        'State each verdict against the original, not against your impression. If a doubt turns out to be unfounded, say so plainly. If everything checks out, say exactly: DOUBTS RESOLVED.',
     ].join('\n');
 
 
@@ -577,6 +582,9 @@
         fullTextCap: 0,
         auditWindow: 6,
         auditFetchRounds: 1,
+        // A sweep that cannot end is a sweep nobody runs twice. The budget stops the
+        // run cleanly at a saved resume point instead of burning an evening.
+        auditMaxCalls: 40,
         maxTokens: 8192,
         llmTimeoutSec: 300,
         thinkRetries: 2,
@@ -1522,6 +1530,45 @@
         // applyMemOneInner, and Peek surfaces it in the panel.
 
         return parts.length ? parts.join('\n\n') : '(no memory extension data detected — pattern: ' + settings.memoryKeyPattern + ')';
+    }
+
+    // The sweep's universe. Ghosted messages are ALREADY represented by the memory
+    // snippets, so re-reading them linearly audits the same events twice and costs
+    // the run its usable length — their originals are pulled only when the memory
+    // pass names a doubt that needs settling.
+    function visibleIds(chat) {
+        const list = Array.isArray(chat) ? chat : [];
+        const out = [];
+        for (let i = 0; i < list.length; i++) if (list[i] && !list[i].is_system) out.push(i);
+        return out;
+    }
+
+    // "12", 12, "40-46" -> flat id list. What the memory pass asks to see.
+    function parseVerify(text) {
+        const b = findBlock(text, 'verify');
+        if (!b) return [];
+        const m = b.inner.match(/\[[\s\S]*?\]/);
+        if (!m) return [];
+        let arr;
+        try { arr = parseJsonLoose(m[0]); } catch (e) { return []; }
+        if (!Array.isArray(arr)) return [];
+        const out = [];
+        const seen = new Set();
+        const push = (n) => { if (Number.isInteger(n) && n >= 0 && !seen.has(n)) { seen.add(n); out.push(n); } };
+        for (const x of arr) {
+            if (typeof x === 'number') { push(x); continue; }
+            const str = String(x == null ? '' : x).trim();
+            const range = str.match(/^(\d+)\s*[-\u2013]\s*(\d+)$/);
+            if (range) {
+                const a = Number(range[1]), b2 = Number(range[2]);
+                const lo = Math.min(a, b2), hi = Math.max(a, b2);
+                for (let i = lo; i <= hi && (i - lo) < 60; i++) push(i);   // a runaway range cannot eat the run
+                continue;
+            }
+            const one = str.match(/^\d+$/);
+            if (one) push(Number(str));
+        }
+        return out;
     }
 
     function ghostedSet() {
@@ -3768,8 +3815,9 @@
         const extra = String(rawExtra || '').trim();
         const wantRestart = /\b(restart|fresh|again|all)\b/i.test(extra);
         const structureOnly = /\bstructure\b/i.test(extra);
+        const wantGhosted = /\bghosted\b/i.test(extra);
         const fromM = extra.match(/\bfrom\s*#?(\d+)/i);
-        const userNote = extra.replace(/\b(restart|fresh|again|all|structure)\b/ig, '').replace(/\bfrom\s*#?\d+/ig, '').trim();
+        const userNote = extra.replace(/\b(restart|fresh|again|all|structure|ghosted)\b/ig, '').replace(/\bfrom\s*#?\d+/ig, '').trim();
         const extraLine = userNote ? '\n\nAdditional instruction from the user (applies to this whole audit): ' + userNote : '';
 
         beginRun();
@@ -3778,6 +3826,7 @@
         const busy = addBubble('busy', 'deep audit \u2014 starting\u2026');
         const tick = busyTicker(busy, 'deep audit');
         const report = [];
+        const doubts = new Set();   // message ids pass 3 could not settle from memory alone
         let calls = 0;
         const note = (t) => { addBubble('note', t); pushHistoryTo(sessObj, 'note', t); };
         const alive = () => {
@@ -3791,6 +3840,15 @@
             const st = auditState();
             if (wantRestart || fromM) { st.cursor = fromM ? Math.min(chat.length - 1, Math.max(0, Number(fromM[1]))) : 0; st.phase = 'structure'; }
             const resumed = !wantRestart && !fromM && st.cursor > 0;
+            const budget = numSetting(settings.auditMaxCalls, defaults.auditMaxCalls, 1, 400);
+            const overBudget = () => calls >= budget;
+            const visible = visibleIds(chat);
+            const ghostCount = chat.length - visible.length;
+            const todo = visible.filter(i => i >= st.cursor);
+            const winPlan = numSetting(settings.auditWindow, defaults.auditWindow, 2, 40);
+            note('\uD83D\uDCCF Scope: ' + visible.length + ' visible message(s) of ' + chat.length
+                + (ghostCount ? ' (' + ghostCount + ' ghosted \u2014 already in memory, their originals are pulled only where the audit doubts something)' : '')
+                + ' \u2192 about ' + Math.ceil(todo.length / winPlan) + ' continuity call(s), budget ' + budget + '.');
 
             // ---------------- PASS 1: structure (code first, model second) -------------
             tick.phase('deep audit \u00b7 scanning structure');
@@ -3800,12 +3858,18 @@
                 note('\u2705 Structure: ' + chat.length + ' message(s) scanned \u2014 every machine block balanced, unique, and in the shape the rest of the chat uses.');
                 report.push('STRUCTURE: clean across all ' + chat.length + ' messages.');
             } else {
-                note('\uD83D\uDD0E Structure: ' + flagged + ' message(s) carry provable faults \u2014 #' + rows.map(r => r.id).join(', #'));
+                // Ghosted faults are still REPORTED — they matter if the message is ever
+                // restored — but they do not spend model calls unless asked for.
+                const vis = new Set(visibleIds(chat));
+                const repairable = wantGhosted ? rows : rows.filter(r => vis.has(r.id));
+                const deferred = wantGhosted ? [] : rows.filter(r => !vis.has(r.id));
+                note('\uD83D\uDD0E Structure: ' + flagged + ' message(s) carry provable faults \u2014 #' + rows.map(r => r.id).join(', #')
+                    + (deferred.length ? ' (' + deferred.length + ' of them ghosted \u2014 listed, not repaired; run "#m structure ghosted" to repair those too)' : ''));
                 report.push('STRUCTURE: ' + flagged + ' message(s) flagged.\n' + formatStructureFlags(rows));
-                for (let k = 0; k < rows.length; k += 3) {
-                    if (!alive()) break;
-                    const batch = rows.slice(k, k + 3);
-                    tick.phase('deep audit \u00b7 structure ' + Math.min(k + 3, rows.length) + '/' + rows.length);
+                for (let k = 0; k < repairable.length; k += 3) {
+                    if (!alive() || overBudget()) break;
+                    const batch = repairable.slice(k, k + 3);
+                    tick.phase('deep audit \u00b7 structure ' + Math.min(k + 3, repairable.length) + '/' + repairable.length);
                     const reply = await auditAsk([
                         sysPrompt(),
                         AUDITOR_DOCTRINE,
@@ -3825,18 +3889,20 @@
                 const win = numSetting(settings.auditWindow, defaults.auditWindow, 2, 40);
                 const rounds = numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4);
                 const memText = gatherMemory();
-                const total = Math.max(1, Math.ceil((chat.length - st.cursor) / win));
+                const total = Math.max(1, Math.ceil(todo.length / win));
                 if (resumed) note('\u21BB Resuming the continuity sweep from #' + st.cursor + ' (a previous run stopped there).');
                 let done = 0;
-                for (let start = st.cursor; start < chat.length; start += win) {
-                    if (!alive()) break;
-                    const end = Math.min(chat.length - 1, start + win - 1);
+                for (let w = 0; w < todo.length; w += win) {
+                    if (!alive() || overBudget()) break;
+                    const ids = todo.slice(w, w + win);
+                    const start = ids[0];
+                    const end = ids[ids.length - 1];
                     done++;
                     tick.phase('deep audit \u00b7 continuity #' + start + '\u2013#' + end + ' (' + done + '/' + total + ')');
-                    const ids = [];
-                    for (let i = start; i <= end; i++) ids.push(i);
-                    const ribIds = [];
-                    for (let i = Math.max(0, start - 2); i < start; i++) ribIds.push(i);
+                    // The ribbon is the previous VISIBLE messages, not the previous ids:
+                    // ghosted neighbours would drag summarized material back in.
+                    const before = visible.filter(i => i < start);
+                    const ribIds = before.slice(-2);
                     const reply = await auditAsk([
                         sysPrompt(),
                         AUDITOR_DOCTRINE,
@@ -3853,7 +3919,7 @@
                     st.ts = Date.now();
                     saveMeta();
                 }
-                if (st.cursor >= chat.length) { st.cursor = 0; saveMeta(); }
+                if (st.cursor > (visible.length ? visible[visible.length - 1] : 0)) { st.cursor = 0; saveMeta(); }
             }
 
             // ---------------- PASS 3: memory against itself ----------------------------
@@ -3864,7 +3930,7 @@
                     note('Memory pass skipped \u2014 no memory-extension data is visible in this chat.');
                 } else {
                     for (let k = 0; k < chunks.length; k++) {
-                        if (!alive()) break;
+                        if (!alive() || overBudget()) break;
                         tick.phase('deep audit \u00b7 memory ' + (k + 1) + '/' + chunks.length);
                         const reply = await auditAsk([
                             sysPrompt(),
@@ -3874,30 +3940,41 @@
                         calls++;
                         if (!alive()) break;
                         ingestProposals(reply);
+                        for (const id of parseVerify(reply)) doubts.add(id);
                         const prose = stripBlocks(reply).trim();
                         if (prose && !/^MEMORY CONSISTENT\.?$/i.test(prose)) report.push('MEMORY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
                     }
                 }
             }
 
-            // ---------------- PASS 4: fidelity to the originals ------------------------
+            // ---------------- PASS 4: verify the doubts, and only the doubts -----------
+            // The old shape walked every memory section and fetched originals for all of
+            // them — it re-read the whole ghosted history to confirm what was already
+            // right. Now the originals are pulled ONLY where pass 3 said it could not
+            // settle something, so a healthy memory costs zero calls here.
             if (!structureOnly && alive()) {
-                const memText = gatherMemory();
-                const chunks = chunkMemory(memText, 12000);
-                for (let k = 0; k < chunks.length; k++) {
-                    if (!alive()) break;
-                    tick.phase('deep audit \u00b7 fidelity ' + (k + 1) + '/' + chunks.length);
-                    const reply = await auditAsk([
-                        sysPrompt(),
-                        AUDITOR_DOCTRINE,
-                        '[MESSAGE INDEX]\n' + buildIndex(),
-                        '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
-                    ], AUDIT_FIDELITY_PROMPT + extraLine, Math.max(2, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
-                    calls++;
-                    if (!alive()) break;
-                    ingestProposals(reply);
-                    const prose = stripBlocks(reply).trim();
-                    if (prose && !/^SECTION FAITHFUL\.?$/i.test(prose)) report.push('FIDELITY ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+                const wanted = [...doubts].filter(id => (ctx().chat || [])[id]).sort((a, b) => a - b);
+                if (!wanted.length) {
+                    note('\u2705 Nothing to verify: the memory settled every question on its own, so no ghosted originals were pulled.');
+                } else {
+                    note('\uD83D\uDD0D Verifying ' + wanted.length + ' original message(s) the memory could not settle \u2014 #' + wanted.join(', #'));
+                    const memText = gatherMemory();
+                    for (let k = 0; k < wanted.length; k += 6) {
+                        if (!alive() || overBudget()) break;
+                        const batch = wanted.slice(k, k + 6);
+                        tick.phase('deep audit \u00b7 verify ' + Math.min(k + 6, wanted.length) + '/' + wanted.length);
+                        const reply = await auditAsk([
+                            sysPrompt(),
+                            AUDITOR_DOCTRINE,
+                            '[STORY MEMORY]\n' + memText,
+                            '[ORIGINAL MESSAGES UNDER DOUBT]\n' + fullTextOf(batch, 0),
+                        ], AUDIT_VERIFY_PROMPT + extraLine, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4), tick);
+                        calls++;
+                        if (!alive()) break;
+                        ingestProposals(reply);
+                        const prose = stripBlocks(reply).trim();
+                        if (prose && !/^DOUBTS RESOLVED\.?$/i.test(prose)) report.push('VERIFY #' + batch.join(', #') + ':\n' + prose);
+                    }
                 }
             }
 
@@ -3908,9 +3985,11 @@
                 addBubble('note', 'Chat changed mid-audit \u2014 the remaining passes were dropped and nothing was written to the new chat.');
                 return;
             }
-            const head = (stopped ? '\u23F9 Deep audit STOPPED early' : '\u2705 Deep audit complete')
-                + ' \u2014 ' + calls + ' model call(s), ' + chat.length + ' message(s) scanned in code'
-                + (stopped ? '. It resumes from #' + auditState().cursor + ' next time you run #m.' : '.');
+            const hitBudget = overBudget();
+            if (hitBudget && !stopped) note('\u23F8 Call budget reached (' + budget + '). The resume point is saved \u2014 run #m again to continue, or raise the budget in settings.');
+            const head = (stopped ? '\u23F9 Deep audit STOPPED early' : hitBudget ? '\u23F8 Deep audit PAUSED at its call budget' : '\u2705 Deep audit complete')
+                + ' \u2014 ' + calls + ' model call(s), ' + chat.length + ' message(s) scanned in code, ' + visible.length + ' visible message(s) swept'
+                + ((stopped || hitBudget) ? '. It resumes from #' + auditState().cursor + ' next time you run #m.' : '.');
             const body = report.length ? report.join('\n\n') : 'Nothing to report: no structural faults, no continuity contradictions, no memory conflicts found.';
             pushHistoryTo(sessObj, 'assistant', head + '\n\n' + body);
             renderHistory();
@@ -4909,6 +4988,7 @@
             '  <div><label>Fetch rounds</label><input type="number" id="cc_rounds" min="0" max="6"></div>',
             '  <div><label>Message text cap (0 = whole message)</label><input type="number" id="cc_textcap" min="0" max="200000"></div>',
             '  <div><label>Deep audit window (msgs/pass)</label><input type="number" id="cc_auditwin" min="2" max="40"></div>',
+            '  <div><label>Deep audit call budget</label><input type="number" id="cc_auditmax" min="1" max="400"></div>',
             '  <div><label>Max output tokens</label><input type="number" id="cc_maxtok" min="256" max="32768" step="256"></div>',
             '  <div><label>LLM stall timeout (s, 0 = off)</label><input type="number" id="cc_llm_timeout" min="0" max="3600" step="30"></div>',
             '</div>',
@@ -4971,6 +5051,7 @@
         el('cc_rounds').value = settings.fetchRounds;
         el('cc_textcap').value = settings.fullTextCap;
         el('cc_auditwin').value = settings.auditWindow;
+        el('cc_auditmax').value = settings.auditMaxCalls;
         el('cc_maxtok').value = settings.maxTokens;
         el('cc_llm_timeout').value = Number.isFinite(Number(settings.llmTimeoutSec)) ? settings.llmTimeoutSec : 300;
         el('cc_think_retries').value = Number.isFinite(Number(settings.thinkRetries)) ? settings.thinkRetries : 2;
@@ -5006,6 +5087,7 @@
             settings.fetchRounds = numSetting(el('cc_rounds').value, defaults.fetchRounds, 0, 6);
             settings.fullTextCap = numSetting(el('cc_textcap').value, defaults.fullTextCap, 0, 200000);
             settings.auditWindow = numSetting(el('cc_auditwin').value, defaults.auditWindow, 2, 40);
+            settings.auditMaxCalls = numSetting(el('cc_auditmax').value, defaults.auditMaxCalls, 1, 400);
             settings.maxTokens = numSetting(el('cc_maxtok').value, defaults.maxTokens, 256, 32768);
             settings.llmTimeoutSec = numSetting(el('cc_llm_timeout').value, defaults.llmTimeoutSec, 0, 3600);
             settings.thinkRetries = numSetting(el('cc_think_retries').value, defaults.thinkRetries, 0, 99);

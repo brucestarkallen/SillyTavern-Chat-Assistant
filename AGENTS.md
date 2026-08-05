@@ -35,6 +35,7 @@ There is no other gate and no partial credit.
 - **`beginRun()` is the only place the run lock is taken and the only place `stopRequested` is cleared.** The gate counts the call sites; add an entrypoint and the count assertion must be updated deliberately.
 - **Cross-chat contamination:** every LLM flow captures `chatRef()` at entry and checks `sameChat()` before writing anything.
 - **`continuityCopilot` is the storage MODULE id.** Renaming it orphans every user's settings and per-chat data.
+- **The deep audit sweeps VISIBLE messages only.** A ghosted message is already represented by a memory snippet; sweeping it linearly audits the same events twice and is what made a full run take an hour. Ghosted originals are pulled only where a pass states a doubt (`<verify>`), and a call budget pauses the run at a saved cursor rather than letting it run unbounded.
 - **Chat-scoped state, not global.** Director, hidden ledger, session history, and the deep-audit resume cursor all live in `chatMetadata.continuityCopilot`.
 - **Undo is refusal-first and node-scoped**: backups and drift fingerprints are taken at the edited node, never at the root key.
 - **Model-agnostic:** never hardcode a model identity or design around one model's quirks.

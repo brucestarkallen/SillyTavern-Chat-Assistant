@@ -1368,8 +1368,8 @@ ctx.ConnectionManagerRequestService = {
         const all = messages.map(m => String(m.content || '')).join('\n');
         if (all.includes('PASS 1 of 4')) { passes.push('structure'); return 'fixed'; }
         if (all.includes('PASS 2 of 4')) { passes.push('continuity'); return 'Scene 3 contradicts the memory.\n<edits>[{"id":3,"find":"iron","replace":"steel"}]</edits>'; }
-        if (all.includes('PASS 3 of 4')) { passes.push('memory'); return 'MEMORY CONSISTENT'; }
-        if (all.includes('PASS 4 of 4')) { passes.push('fidelity'); return 'SECTION FAITHFUL'; }
+        if (all.includes('PASS 3 of 4')) { passes.push('memory'); return 'Snippet 2 looks thin.\n<verify>[3]</verify>'; }
+        if (all.includes('PASS 4 of 4')) { passes.push('verify'); return 'DOUBTS RESOLVED'; }
         passes.push('other'); return 'x';
     },
 };
@@ -1377,7 +1377,7 @@ document.getElementById('cc_input').value = '#m';
 clickFresh('cc_send');
 await sleep(1400);
 ok(passes.filter(p => p === 'continuity').length === 3, 'the continuity pass walked the WHOLE 12-message log in 4-message windows (got ' + passes.filter(p => p === 'continuity').length + ')');
-ok(passes.includes('memory') && passes.includes('fidelity'), 'the memory and fidelity passes both ran without being asked separately');
+ok(passes.includes('memory') && passes.includes('verify'), 'the memory pass ran unasked, and the verify pass fired because it raised a doubt');
 ok(!passes.includes('other'), 'every audit call carried one of the four pass contracts');
 const auditLog = ccLogText().join('\n');
 ok(/Deep audit complete/.test(auditLog), 'the audit ends with a consolidated verdict');
@@ -1515,6 +1515,9 @@ ctx.ConnectionManagerRequestService = {
         const all = messages.map(m => String(m.content || '')).join('\n');
         const m = all.match(/PASS (\d) of 4/);
         if (m) seenByPass[m[1]] = all;
+        // Pass 4 only exists when pass 3 states a doubt, so the fixture must state one
+        // or the doctrine check would silently cover three passes instead of four.
+        if (m && m[1] === '3') return 'Snippet looks thin.\n<verify>[2]</verify>';
         return 'WINDOW CLEAN';
     },
 };
@@ -1563,6 +1566,100 @@ for (const tag of ['#br', '#opt', '#cl']) {
     ok(hits === 1, tag + ' appears exactly once in the shortcut list (got ' + hits + ')');
 }
 ok(SRC.includes('for (const line of [BRIEF_SHORTCUT, OPTIMIZE_SHORTCUT, CLEANUP_SHORTCUT])'), 'an install predating these commands gets the lines appended on load');
+
+console.log('== v2.74.0: the sweep reads the VISIBLE chat, not the ghosted history ==');
+// A ghosted message is already represented by a memory snippet. Sweeping it again
+// audits the same events twice and costs the run its usable length — an hour on a
+// long chat. Ghosted originals are pulled only where the memory raises a doubt.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.auditWindow = 4;
+CA.auditMaxCalls = 40;
+ctx.chat.length = 0;
+for (let i = 0; i < 20; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Scene ' + i + ' happened.', is_system: i < 12 });   // 0-11 ghosted, 12-19 visible
+ctx.chatMetadata.summary_memory = 'SNIPPET: the early scenes. (covers chat messages #0 to #11)';
+
+const winIds = [];
+let verifySeen = '';
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        if (all.includes('PASS 2 of 4')) {
+            const m = all.match(/MESSAGES UNDER AUDIT — #(\d+) to #(\d+)/);
+            if (m) winIds.push(m[1] + '-' + m[2]);
+            return 'WINDOW CLEAN';
+        }
+        if (all.includes('PASS 3 of 4')) return 'Snippet is thin around the ambush.\n<verify>["3-5", 9]</verify>';
+        if (all.includes('PASS 4 of 4')) { verifySeen = all; return 'DOUBTS RESOLVED'; }
+        return 'ok';
+    },
+};
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(1800);
+ok(winIds.length === 2, 'the sweep ran 2 windows for 8 visible messages, not 5 for all 20 (got ' + winIds.length + ': ' + winIds.join(' ') + ')');
+ok(winIds.join(' ') === '12-15 16-19', 'every window is built from VISIBLE ids only (got ' + winIds.join(' ') + ')');
+ok(/Scope: 8 visible message\(s\) of 20/.test(ccLogText().join('\n')), 'the scope and the cost are stated BEFORE the run, not discovered after an hour');
+
+console.log('== v2.74.0: ghosted originals are pulled only on a stated doubt ==');
+ok(/Verifying 4 original message\(s\)/.test(ccLogText().join('\n')), 'pass 4 pulled exactly the ids pass 3 doubted — the "3-5" range expanded plus #9');
+ok(/--- #3 \[N\]/.test(verifySeen) && /--- #9 \[N\]/.test(verifySeen) && !/--- #7 \[N\]/.test(verifySeen), 'the doubted originals are served whole; the undoubted ghosted ones are never read');
+ok(/ORIGINAL MESSAGES UNDER DOUBT/.test(verifySeen), 'pass 4 is framed as settling doubts against originals, not as a walk of every section');
+
+// A memory that checks out costs ZERO calls in pass 4 — the old shape re-read the
+// entire ghosted history to confirm what was already right.
+dismissPending();
+let pass4Ran = 0;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        if (all.includes('PASS 4 of 4')) pass4Ran++;
+        if (all.includes('PASS 3 of 4')) return 'MEMORY CONSISTENT';
+        return 'WINDOW CLEAN';
+    },
+};
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(1800);
+ok(pass4Ran === 0, 'a memory with no doubts costs zero verification calls (got ' + pass4Ran + ')');
+ok(/Nothing to verify/.test(ccLogText().join('\n')), 'and it says so rather than silently skipping a pass');
+
+console.log('== v2.74.0: broken blocks inside ghosted messages are reported, not silently repaired ==');
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: '<details>\n<summary>Tracker</summary>\n- State: fine\n</details>welded junk', is_system: true });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'A visible scene, nothing wrong with it.' });
+let structCalls = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { if (messages.map(m => String(m.content || '')).join('\n').includes('PASS 1 of 4')) structCalls++; return 'ok'; } };
+document.getElementById('cc_input').value = '#m structure';
+clickFresh('cc_send');
+await sleep(800);
+ok(structCalls === 0, 'a ghosted fault spends no model call by default (got ' + structCalls + ')');
+ok(/1 of them ghosted — listed, not repaired/.test(ccLogText().join('\n')), 'but it is still reported, with the way to repair it');
+dismissPending();
+structCalls = 0;
+document.getElementById('cc_input').value = '#m structure ghosted';
+clickFresh('cc_send');
+await sleep(800);
+ok(structCalls === 1, '"#m structure ghosted" repairs it on request (got ' + structCalls + ')');
+
+console.log('== v2.74.0: the run has a budget it cannot exceed ==');
+dismissPending();
+ctx.chat.length = 0;
+for (let i = 0; i < 60; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Scene ' + i + '.' });
+CA.auditWindow = 2;
+CA.auditMaxCalls = 5;
+let budgetCalls = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async () => { budgetCalls++; return 'WINDOW CLEAN'; } };
+document.getElementById('cc_input').value = '#m restart';
+clickFresh('cc_send');
+await sleep(2500);
+ok(budgetCalls <= 6, 'the budget stopped the run instead of walking all 30 windows (got ' + budgetCalls + ')');
+ok(/Call budget reached \(5\)/.test(ccLogText().join('\n')), 'the pause is announced with the number that caused it');
+ok(((ctx.chatMetadata['continuityCopilot'] || {}).audit || {}).cursor > 0, 'the resume point survives a budget pause, so #m continues rather than restarts');
+CA.auditMaxCalls = 40;
+CA.auditWindow = 6;
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
