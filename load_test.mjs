@@ -990,7 +990,7 @@ console.log('== v2.69.0 invariants: the stop flag belongs to the RUN, not to one
 // the user had already cancelled.
 ok(/function beginRun\(\) \{\n        running = true;\n        stopRequested = false;\n        setBusy\(true\);\n    \}/.test(SRC), 'beginRun() is the one place a run starts: takes the lock AND clears the stop flag');
 ok((SRC.match(/\n        running = true;/g) || []).length === 1, 'the lock is taken in exactly one place (beginRun), nowhere else');
-ok((SRC.match(/\n        beginRun\(\);/g) || []).length === 8, 'all 8 run entrypoints route through beginRun (found ' + (SRC.match(/\n        beginRun\(\);/g) || []).length + ', need 8)');   // +1 in v2.72: runDeepAudit
+ok((SRC.match(/\n        beginRun\(\);/g) || []).length === 9, 'all 9 run entrypoints route through beginRun (found ' + (SRC.match(/\n        beginRun\(\);/g) || []).length + ', need 9)');   // +1 in v2.72 (runDeepAudit), +1 in v2.73 (runMemoryPass)
 ok(!/const maxTok = [^\n]*\n        stopRequested = false;/.test(SRC), 'callLLM no longer clears the stop flag');
 ok(/if \(stopRequested\) return '';\n        try \{ abortCtl = new AbortController/.test(SRC), 'callLLM refuses to open a request when the run is already stopped');
 
@@ -1492,6 +1492,77 @@ await sleep(900);
 ok(/Auto-fetched #0/.test(ccLogText().join('\n')), 'an edit proposed off a PART triggers the auto-fetch instead of being staged blind');
 CA.fullTextCap = 0;
 CA.recentFull = 8;
+
+console.log('== v2.73.0: the memory auditor doctrine runs INSIDE the panel ==');
+// Summaryception's MEMORY_AUDITOR.md was a paste-into-another-AI protocol: export
+// a transplant .md, audit it elsewhere, re-import the whole file. One wrong number
+// cost a full round trip, and the auditor never saw the chat the memory came from.
+// Same mandates, live memory, live chat, reviewable cards.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.auditWindow = 6;
+ctx.chat.length = 0;
+for (let i = 0; i < 6; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Scene ' + i + ' happened at the keep.' });
+// One message must actually be broken, or pass 1 has nothing to send and the
+// "every pass carries the doctrine" check would silently test only three passes.
+ctx.chat.push({ is_user: false, name: 'N', mes: '<details>\n<summary>Tracker</summary>\n- State: fine\n</details>junk welded on' });
+ctx.chatMetadata.summary_memory = 'NOTEPAD: Jillian starts at the academy.\nSNIPPET: Jillian rode to the keep. (covers chat messages #0 to #3)';
+
+const seenByPass = {};
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        const m = all.match(/PASS (\d) of 4/);
+        if (m) seenByPass[m[1]] = all;
+        return 'WINDOW CLEAN';
+    },
+};
+document.getElementById('cc_input').value = '#m';
+clickFresh('cc_send');
+await sleep(1500);
+const passes4 = ['1', '2', '3', '4'];
+ok(passes4.every(k => seenByPass[k] && seenByPass[k].includes('[AUDITOR DOCTRINE')), 'all four audit passes carry the auditor doctrine');
+ok(passes4.every(k => /M-RECORD/.test(seenByPass[k] || '') && /M-EPISTEMIC/.test(seenByPass[k] || '') && /M-SCAN/.test(seenByPass[k] || '') && /M-EYE/.test(seenByPass[k] || '') && /M-TAGS/.test(seenByPass[k] || '')), 'every mandate ships on every pass (record, epistemic, scan, eye, tags)');
+ok(/use ONE bulk_replace edit rather than one edit per message/.test(seenByPass['2'] || ''), 'the class sweep is wired to the bulk_replace the extension actually has — not left as advice');
+ok(/CORE \(stable identity\), STATE/.test(seenByPass['3'] || ''), 'the ledger field grammar (CORE / STATE / ARC / THREADS) reaches the memory pass');
+
+// The notepad is the OPENING state on purpose. A pass that "reconciles" it against
+// later snippets would propose destructive edits to the author's own starting canon.
+const mem3 = seenByPass['3'] || '';
+ok(/records the OPENING state on purpose/.test(mem3) && /progression, not a contradiction/.test(mem3), 'the memory pass is told the notepad is deliberately static');
+ok(!/notepad\/plot-essential vs every snippet/.test(mem3), 'the old instruction to cross-check the notepad against the snippets is gone');
+
+console.log('== v2.73.0: optimize and cleanup, no export/import round trip ==');
+dismissPending();
+let optSeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { optSeen = messages.map(m => String(m.content || '')).join('\n'); return 'Estimated 4100 -> 3600 chars.\n<memedits>[{"find":"Jillian rode to the keep.","replace":"Jillian rode to the keep."}]</memedits>'; } };
+const memBefore = ctx.chatMetadata.summary_memory;
+document.getElementById('cc_input').value = '#opt';
+clickFresh('cc_send');
+await sleep(900);
+ok(/ZERO-LOSS VERIFICATION/.test(optSeen) && /4-question test/.test(optSeen), '#opt carries the zero-loss contract and the 4-question test');
+ok(/SEQUENTIAL AGGREGATION/.test(optSeen) && /NOTATION COMPRESSION last/.test(optSeen), 'the eight techniques ship in order, first and last both present');
+ok(/Never touch the notepad. Never reword a pinned quote./.test(optSeen), '#opt is barred from the notepad and from pinned quotes');
+ok(ctx.chatMetadata.summary_memory === memBefore, 'nothing was written: the pass only STAGES, Apply is the approval gate');
+ok(/nothing has changed yet/.test(ccLogText().join('\n')), 'the verdict says so out loud instead of implying a change happened');
+
+dismissPending();
+let clSeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { clSeen = messages.map(m => String(m.content || '')).join('\n'); return 'Throughline: a squire becomes a threat.'; } };
+document.getElementById('cc_input').value = '#cl';
+clickFresh('cc_send');
+await sleep(900);
+ok(/SPINE/.test(clSeen) && /SUPPORT/.test(clSeen) && /TEXTURE/.test(clSeen) && /NOISE/.test(clSeen), '#cl carries the four-way manifest classification');
+ok(/cold-read test/.test(clSeen) && /motivation check/.test(clSeen), '#cl runs the director\u2019s read before any manifest');
+ok(/KEEP it and flag it/.test(clSeen) && /attachment is value/.test(clSeen), 'the safeguards survive: unsure keeps, and the author\u2019s attachment wins');
+
+console.log('== v2.73.0: the new commands are documented exactly once ==');
+for (const tag of ['#br', '#opt', '#cl']) {
+    const hits = (String(CA.shortcuts || '').match(new RegExp('^\\s*' + tag.replace('#', '\\#') + '\\s*=', 'gm')) || []).length;
+    ok(hits === 1, tag + ' appears exactly once in the shortcut list (got ' + hits + ')');
+}
+ok(SRC.includes('for (const line of [BRIEF_SHORTCUT, OPTIMIZE_SHORTCUT, CLEANUP_SHORTCUT])'), 'an install predating these commands gets the lines appended on load');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');

@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.72.0';
+    const VERSION = '2.73.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -134,6 +134,9 @@
 
     // #m stopped being a single prompt in v2.72: it runs the four-pass sweep in
     // runDeepAudit(). The line stays in the editable list so the panel documents it.
+    const BRIEF_SHORTCUT = '#br = Write a short handoff paragraph for a fresh storyteller: where the story stands and what is in motion. Prose only, no edits.';
+    const OPTIMIZE_SHORTCUT = '#opt = MEMORY OPTIMIZE \u2014 zero-loss token reduction of the memory, section by section (aggregation, reference stripping, dialogue-surround and texture compression, causal notation), with a mandatory zero-loss verification before anything is proposed. Never touches the notepad or a pinned quote. Nothing changes until you press Apply.';
+    const CLEANUP_SHORTCUT = '#cl = MEMORY CLEANUP \u2014 the showrunner pass for a cluttered story: throughline, cold-read test, broken coherence, what is missing, motivation check, then a SPINE / SUPPORT / TEXTURE / NOISE manifest. Subtractive proposals only; restructuring is described and waits for your go-ahead.';
     const DEEP_AUDIT_SHORTCUT = '#m = DEEP AUDIT \u2014 audits EVERYTHING in four passes, over the whole log rather than a sample: (1) message STRUCTURE, scanned in code \u2014 unbalanced, duplicated, drifted or shrapnel-carrying machine blocks; (2) CONTINUITY of every window of the chat against [STORY MEMORY]; (3) the MEMORY against itself; (4) FIDELITY of each memory section to the originals it covers. Add words to narrow it: "#m structure" (pass 1 only), "#m from 180" (start at a message), "#m restart" (ignore a saved resume point). It resumes where a stopped run left off.';
     const LEGACY_M_SHORTCUT = '#m = Audit the MEMORY itself for internal continuity errors. Cross-check [STORY MEMORY]: the notepad (PE) vs every snippet vs every audit/detail \u2014 contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and audits that contradict their own snippet. If two versions disagree, <fetch> the ghosted originals to verify which is true. Propose all corrections in a single <memedits> block. Do NOT propose <edits> to chat messages unless I explicitly ask.';
     const PSYCH_SHORTCUT = '#p = Analyze the psychology of the character I name (or the most active one if none is named). Use only [STORY MEMORY] and the chat. Cover: (1) core drives, fears, and formative wounds as established in canon; (2) internal contradictions in how the character is written; (3) consistency: does recent behavior match the established characterization? Flag any out-of-character drift, citing the specific turns; (4) what the character would plausibly do next under the current pressure, and what would ring false. Ground every claim in something concrete. Do not propose edits unless I ask.';
@@ -145,12 +148,36 @@
         DEEP_AUDIT_SHORTCUT,
         '#i = Brainstorm what could happen next. Give 3-5 distinct directions for the upcoming scene(s), each consistent with [STORY MEMORY] and the current situation: a one-line hook plus what it would develop. Do not write the scene itself and do not propose <edits>.',
         PSYCH_SHORTCUT,
+        BRIEF_SHORTCUT,
+        OPTIMIZE_SHORTCUT,
+        CLEANUP_SHORTCUT,
     ].join('\n');
 
 
     // ------------------------------------------------------------------
     // Deep audit (#m) \u2014 one command that audits everything, in passes
     // ------------------------------------------------------------------
+
+    // The doctrine of Summaryception's MEMORY_AUDITOR.md, brought INSIDE the panel.
+    // That protocol was a paste-into-another-AI workflow: export a transplant .md,
+    // audit it elsewhere, re-import the whole file. The round trip is the flaw \u2014 it
+    // costs a full re-import to fix one wrong number, and the auditor never sees the
+    // chat the memory came from. Here the same mandates run against the LIVE memory
+    // and the LIVE chat, and every fix lands as a reviewable card.
+    const AUDITOR_DOCTRINE = [
+        '[AUDITOR DOCTRINE \u2014 binding on every audit pass, in priority order]',
+        'M-RECORD (record-only, anti-fabrication). You repair and reorganize what the memory and chat CONTAIN. You never invent events, motives, psychology, consequences or connections \u2014 not even to justify a cut or a merge. Two connected facts are not automatically dependent. If it is not recorded, it did not happen: fix by correction, removal, or reorganization, and add content only when the user explicitly asks.',
+        'M-EPISTEMIC (knowledge needs a pathway). No character entry may contain knowledge that character has no recorded way of possessing. Where a dossier knows another character\u2019s secret, an off-screen event, or the protagonist\u2019s hidden identity with no discoverable pathway in the chat, REMOVE the knowledge \u2014 never invent a pathway to launder it.',
+        'M-SCAN (disease scan, anti-whack-a-mole). Every error you or the user finds names a CLASS. Sweep for every instance of that class before you answer, and fix all of them in one pass. Fixing only the named instance is a failure. For a class that repeats across chat messages verbatim (a renamed character, a wrong title, a recurring typo) use ONE bulk_replace edit rather than one edit per message. Recurring classes: wrong numbers (ages, counts, distances, dates, money); wrong titles or ranks; wrong attribution (deeds, scars, signature items on the wrong character); reversed causality; stale state a later event invalidated; ledger-vs-snippet contradiction; snippet-vs-snippet timeline conflict; editorial contamination (moral judgment or psychoanalysis the story never established); protagonist reactions preloaded into NPC dossiers; "doesn\u2019t know X" filler that restates the epistemic rule instead of marking a real gap; defensive padding left by past fixes ("to ensure", "so that"); compression damage (subject and object swapped, dialogue stripped of the context that gave it meaning).',
+        'M-EYE (the expert eye). Every reply states: what was asked and done; what you found while in there; and the evidence the class sweep happened (what you scanned, how many instances found and fixed). If a find-and-replace could have produced your reply, the thinking is not finished.',
+        'M-TAGS. In your prose, tag claims [CANON] (quotable from the memory or the chat), [INFERENCE] (derived \u2014 show the reasoning) or [SPECULATION] (a labelled guess). Never mix them unmarked. NEVER write a tag, a note, or any commentary INTO a memory field or a chat message \u2014 the data must read as if it was always this clean.',
+        '',
+        '[MEMORY SHAPE \u2014 what each part is for]',
+        'The NOTEPAD / plot-essential is the author\u2019s STARTING canon, written at the story\u2019s start and deliberately never updated. Its foundational facts (world rules, identities, backstory) are the highest authority in the whole memory. Its situational details describe the OPENING state and are EXPECTED to be outgrown by later events \u2014 that is progression, not staleness. A snippet contradicting a notepad situational detail is NOT a finding and NOT something to "refresh". Edit the notepad only when the user asks, or to fix a contradiction you can cite from inside the notepad itself.',
+        'A LEDGER dossier carries CORE (stable identity), STATE (where and what now), ARC (how they changed) and THREADS (open hooks). Keep those four roles distinct: STATE goes stale and must track the latest events; CORE must not absorb state, reactions, or editorial judgment.',
+        'SNIPPETS are the ordered record of what happened; their detail fields hold the concrete facts. PINNED quotes are verbatim \u2014 never reword one.',
+    ].join('\n');
+
     const AUDIT_STRUCTURE_PROMPT = [
         'DEEP AUDIT \u2014 PASS 1 of 4: STRUCTURE.',
         'A code scanner has already PROVEN the faults listed in [STRUCTURE FLAGS]. They are facts, not guesses. Every message below is served COMPLETE.',
@@ -173,7 +200,8 @@
 
     const AUDIT_MEMORY_PROMPT = [
         'DEEP AUDIT \u2014 PASS 3 of 4: THE MEMORY AGAINST ITSELF.',
-        'Cross-check [STORY MEMORY]: the notepad/plot-essential vs every snippet vs every audit or detail field. Find contradictions between them (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, and any audit that contradicts its own snippet.',
+        'Cross-check [STORY MEMORY] against itself: snippet vs snippet, snippet vs its own detail/audit field, ledger dossier vs the snippets, and dossier vs dossier. Find real contradictions (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, epistemic leaks, and editorial contamination in CORE.',
+        'The NOTEPAD is the exception: it records the OPENING state on purpose. Later events outgrowing it is progression, not a contradiction — do not "update", "refresh" or reconcile it, and do not report it. Touch it only for a contradiction internal to the notepad itself.',
         'Where two versions disagree, <fetch> the original messages to decide which is true before proposing anything.',
         'Propose corrections in a single <memedits> block, "find" copied character-for-character from [STORY MEMORY]. If the memory is internally consistent, say exactly: MEMORY CONSISTENT.',
     ].join('\n');
@@ -184,6 +212,31 @@
         'Report anything LOST or DISTORTED and restore it with <memedits> into the snippet text or its detail field. Never delete detail to make it shorter.',
         'If this section is faithful, say exactly: SECTION FAITHFUL.',
     ].join('\n');
+
+
+    // The auditor's remaining commands, as live in-panel passes. *fix is not a
+    // separate command here: proposals are staged as cards and nothing changes
+    // until Apply \u2014 the approval gate the paste-in protocol had to ask for.
+    const MEM_OPTIMIZE_PROMPT = [
+        'MEMORY OPTIMIZE \u2014 bulletproof token reduction with ZERO information loss.',
+        'The goal is not a smaller memory; it is a smaller memory with NOTHING gone. If both cannot be had, zero loss wins.',
+        'Cut only filler, redundancy and loose expression. PRESERVE unconditionally: every action, name and number (ages, counts, distances, dates, money); every causal chain; every relationship shift; every revelation, leverage and setup; every dialogue line that shifted power or is referenced later; every mature beat, un-euphemized; every named system WITH its mechanism.',
+        'The Human Memory Test: telling this story to a friend from memory, would you include it? Moments that made a character feel something, lines that shifted power, HOW someone won \u2014 never cut. Logistics, staging and transitions \u2014 cut freely.',
+        'The 4-question test on EVERY sentence before it dies: (1) removed, could the storyteller now generate something contradictory? KEEP. (2) removed, is it vague where specificity matters? KEEP. (3) removed, does a later entry stop making sense? KEEP. (4) removed, does nothing about storyteller behavior change? CUT.',
+        'Techniques IN THIS ORDER, each on the previous one\u2019s output, each with a guardrail that keeps the content when it fires: (1) SEQUENTIAL AGGREGATION \u2014 consecutive snippets sharing actor, place and time-window with no load-bearing beat between them merge into one, keeping all facts and the combined span; a snippet holding a power-shifting line, relationship shift, revelation, causal link or growth milestone stays its own entry. (2) REFERENCE STRIPPING \u2014 the ledger holds identity, snippets hold action; strip identity re-descriptions the ledger already carries, but a character\u2019s first appearance keeps its introduction. (3) DIALOGUE SURROUND COMPRESSION \u2014 keep the load-bearing line VERBATIM, compress the staging around it into one action beat. (4) EMOTIONAL TEXTURE COMPRESSION \u2014 long emotional prose becomes label + cause; a first-time emotion, or one contradicting CORE plot-relevantly, keeps its texture. (5) SPATIAL COMPRESSION \u2014 travel becomes origin \u2192 destination plus anything significant en route. (6) CAUSAL CHAIN NOTATION \u2014 multi-step strategies compress to arrow notation keeping every concrete lever; each step\u2019s mechanism must stay inferable ("plan\u2192executed\u2192won" is loss, not compression). (7) REDUNDANT RESTATEMENT STRIPPING \u2014 the source of truth keeps the fact, the restatement keeps only what the other could not convey. (8) NOTATION COMPRESSION last \u2014 pure tightening with zero information content.',
+        'ZERO-LOSS VERIFICATION before you answer (entry count is the WRONG test \u2014 aggregation reduces it by design): every load-bearing line present verbatim, every relationship shift captured, every causal mechanism inferable, every named character still present, every scale-defining number present, every revelation/leverage/setup described, every mature beat un-euphemized. Any check fails \u2014 restore it and re-compress without losing it.',
+        'Propose every change as <memedits>, "find" copied character-for-character. Report the estimated size before and after, and the verification result, as scan evidence. Never touch the notepad. Never reword a pinned quote.',
+    ].join('\n');
+
+    const MEM_CLEANUP_PROMPT = [
+        'MEMORY CLEANUP \u2014 the showrunner pass, for a story grown cluttered. DIAGNOSIS FIRST.',
+        'Phase 1, the director\u2019s read \u2014 write this in your reply: the throughline (what this story is about right now, 1-2 lines); the cold-read test (where exactly would a fresh storyteller get lost?); broken coherence (contradictions and unmotivated jumps, each with the fix you propose); what is MISSING, split into "I can propose" and "only the author can answer" \u2014 ask the second group, never invent it; and the motivation check (does every key action have a planted motive?).',
+        'Phase 2, the manifest. Classify every element: SPINE (2-5 core arcs \u2014 if this vanished would the author start a different story? untouchable) / SUPPORT (reinforces a spine arc \u2014 keep, compress, make the connection explicit) / TEXTURE (world-feel driving no arc \u2014 absorb into one broad-stroke entry) / NOISE (dead-end hooks, orphaned setups, minor characters with no future \u2014 remove and patch downstream references). Then the reshape list: untangle knotted threads into clean sequence, merge arcs doing the identical job, resolve or park dangling threads in one line, re-sequence where chronology allows, cut decorative callbacks and keep load-bearing ones.',
+        'Safeguards: would a good showrunner cut this in the writers\u2019 room? Remove confusion and junk, never richness \u2014 a rich story keeps its B-plots and quiet beats. Unsure whether something is texture or junk: KEEP it and flag it. If knowledge from a texture moment feeds a spine arc, it is SUPPORT. If the user says keep it, it is kept with zero pushback \u2014 attachment is value.',
+        'Propose the subtractive DECLUTTER edits as <memedits> so the user can approve them one card at a time; describe any restructuring you would do but did not, and wait for the go-ahead before proposing it.',
+    ].join('\n');
+
+    const MEM_BRIEF_PROMPT = 'Write a short handoff paragraph telling a fresh storyteller where this story stands and what is in motion \u2014 the situation, the live pressures, and what each major character wants right now. Prose only, no lists, no headers, no edits of any kind. It goes at the top of a new session.';
 
     const LEGACY_DIRECTOR_PROMPT = [
         'You are an expert story director for a long-form roleplay. Write a SECRET director\'s note for the storyteller AI. The player must never see it.',
@@ -674,6 +727,15 @@
             // hand-customized line alone (the routing is in send() either way).
             if (typeof settings.shortcuts === 'string' && settings.shortcuts.includes(LEGACY_M_SHORTCUT)) {
                 settings.shortcuts = settings.shortcuts.replace(LEGACY_M_SHORTCUT, DEEP_AUDIT_SHORTCUT);
+            }
+            // Append any shortcut line a stored copy predates, so an old install
+            // documents the commands it actually has. Routing works regardless.
+            for (const line of [BRIEF_SHORTCUT, OPTIMIZE_SHORTCUT, CLEANUP_SHORTCUT]) {
+                const tag = line.slice(0, line.indexOf(' ='));
+                const re = new RegExp('^\\s*' + tag.replace('#', '\\#') + '\\s*=', 'm');
+                if (typeof settings.shortcuts === 'string' && settings.shortcuts.trim() && !re.test(settings.shortcuts)) {
+                    settings.shortcuts = settings.shortcuts.replace(/\s*$/, '') + '\n' + line;
+                }
             }
         } catch (e) { /* ignore */ }
         // Same class: a stored copy of the 2.71 system prompt describes [FULL MESSAGES]
@@ -3352,6 +3414,20 @@
             toast('Usage: #d your direction \u2014 e.g. "#d make Silas corner Jovan at the duel field this episode"', 'info');
             return;
         }
+        const om = userText.match(/^#opt\b\s*([\s\S]*)$/i);
+        if (om) {
+            addBubble('user', userText);
+            pushHistory('note', '\uD83D\uDDDC\uFE0F Memory optimize started');
+            await runMemoryPass('optimize', om[1]);
+            return;
+        }
+        const clm = userText.match(/^#cl\b\s*([\s\S]*)$/i);
+        if (clm) {
+            addBubble('user', userText);
+            pushHistory('note', '\uD83E\uDDF9 Memory cleanup started');
+            await runMemoryPass('cleanup', clm[1]);
+            return;
+        }
         const mm = userText.match(/^#m\b\s*([\s\S]*)$/i);
         if (mm) {
             addBubble('user', userText);
@@ -3732,6 +3808,7 @@
                     tick.phase('deep audit \u00b7 structure ' + Math.min(k + 3, rows.length) + '/' + rows.length);
                     const reply = await auditAsk([
                         sysPrompt(),
+                        AUDITOR_DOCTRINE,
                         '[STRUCTURE FLAGS \u2014 proven by a code scan; treat as fact]\n' + formatStructureFlags(batch),
                         '[MESSAGES UNDER AUDIT]\n' + fullTextOf(batch.map(r => r.id), 0),
                     ], AUDIT_STRUCTURE_PROMPT + extraLine, 0, tick);
@@ -3762,6 +3839,7 @@
                     for (let i = Math.max(0, start - 2); i < start; i++) ribIds.push(i);
                     const reply = await auditAsk([
                         sysPrompt(),
+                        AUDITOR_DOCTRINE,
                         '[STORY MEMORY]\n' + memText,
                         ribIds.length ? '[CONTEXT RIBBON \u2014 already audited, do not re-report]\n' + fullTextOf(ribIds, 0) : '',
                         '[MESSAGES UNDER AUDIT \u2014 #' + start + ' to #' + end + ']\n' + fullTextOf(ids, 0),
@@ -3790,6 +3868,7 @@
                         tick.phase('deep audit \u00b7 memory ' + (k + 1) + '/' + chunks.length);
                         const reply = await auditAsk([
                             sysPrompt(),
+                            AUDITOR_DOCTRINE,
                             '[STORY MEMORY' + (chunks.length > 1 ? ' \u2014 section ' + (k + 1) + ' of ' + chunks.length : '') + ']\n' + chunks[k],
                         ], AUDIT_MEMORY_PROMPT + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
                         calls++;
@@ -3810,6 +3889,7 @@
                     tick.phase('deep audit \u00b7 fidelity ' + (k + 1) + '/' + chunks.length);
                     const reply = await auditAsk([
                         sysPrompt(),
+                        AUDITOR_DOCTRINE,
                         '[MESSAGE INDEX]\n' + buildIndex(),
                         '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
                     ], AUDIT_FIDELITY_PROMPT + extraLine, Math.max(2, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
@@ -3837,6 +3917,67 @@
         } catch (err) {
             console.error(LOG, err);
             addBubble('note', 'Deep audit error: ' + (err && err.message ? err.message : err));
+            toast(String(err && err.message ? err.message : err), 'error');
+        } finally {
+            tick.stop();
+            busy.remove();
+            running = false;
+            setBusy(false);
+        }
+    }
+
+
+    // Optimize / cleanup: the same chunked walk the audit uses, one doctrine, one
+    // staging path. No export, no re-import, no whole-file replacement \u2014 the thing
+    // that made the paste-in protocol expensive was that a single wrong number cost
+    // a full round trip.
+    async function runMemoryPass(kind, rawExtra) {
+        if (running) { toast('Another operation is still running \u2014 press \u23F9 Stop first, or wait for it to finish.', 'warning'); return; }
+        const c = ctx();
+        if (!Array.isArray(c.chat) || !c.chat.length) { toast('No chat is loaded.', 'warning'); return; }
+        const label = kind === 'optimize' ? 'memory optimize' : 'memory cleanup';
+        const prompt = kind === 'optimize' ? MEM_OPTIMIZE_PROMPT : MEM_CLEANUP_PROMPT;
+        const extra = String(rawExtra || '').trim();
+        const extraLine = extra ? '\n\nAdditional instruction from the user: ' + extra : '';
+
+        beginRun();
+        const chatAt = chatRef();
+        const sessObj = meta();
+        const busy = addBubble('busy', label + ' \u2014 starting\u2026');
+        const tick = busyTicker(busy, label);
+        const report = [];
+        try {
+            const memText = gatherMemory();
+            const chunks = chunkMemory(memText, kind === 'optimize' ? 12000 : 24000);
+            if (!chunks.length) {
+                addBubble('note', 'Nothing to work on \u2014 no memory-extension data is visible in this chat.');
+                return;
+            }
+            for (let k = 0; k < chunks.length; k++) {
+                if (stopRequested || !sameChat(chatAt)) break;
+                tick.phase(label + ' \u00b7 section ' + (k + 1) + '/' + chunks.length);
+                const reply = await auditAsk([
+                    sysPrompt(),
+                    AUDITOR_DOCTRINE,
+                    '[MESSAGE INDEX]\n' + buildIndex(),
+                    '[STORY MEMORY \u2014 section ' + (k + 1) + ' of ' + chunks.length + ']\n' + chunks[k],
+                ], prompt + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
+                if (!sameChat(chatAt)) break;
+                ingestProposals(reply);
+                const prose = stripBlocks(reply).trim();
+                if (prose) report.push('SECTION ' + (k + 1) + '/' + chunks.length + ':\n' + prose);
+            }
+            if (!sameChat(chatAt)) {
+                addBubble('note', 'Chat changed mid-pass \u2014 the rest was dropped and nothing was written to the new chat.');
+                return;
+            }
+            const head = (stopRequested ? '\u23F9 ' + label + ' STOPPED early' : '\u2705 ' + label + ' complete')
+                + ' \u2014 nothing has changed yet: every proposal is a card, and Apply is the approval.';
+            pushHistoryTo(sessObj, 'assistant', head + '\n\n' + (report.length ? report.join('\n\n') : 'No changes proposed.'));
+            renderHistory();
+        } catch (err) {
+            console.error(LOG, err);
+            addBubble('note', label + ' error: ' + (err && err.message ? err.message : err));
             toast(String(err && err.message ? err.message : err), 'error');
         } finally {
             tick.stop();
