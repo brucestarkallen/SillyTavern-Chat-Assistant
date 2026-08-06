@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.76.0';
+    const VERSION = '2.77.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -71,6 +71,22 @@
         '4. USER_EDIT_RULE',
         '5. Outside those blocks, talk to the user naturally. Keep repair talk brief and concrete; for brainstorming and story discussion you may write more. Never paste whole chat messages back at them.',
         '6. You can ALSO create, edit, configure, and delete SillyTavern Worldbook / World Info (lorebook) entries \u2014 whenever the <wiedits> instructions appear in this prompt, worldbook editing is fully in scope: use it and NEVER say you cannot. (A [WORLDBOOK] block, when present, shows existing entries; you can create brand-new ones even without it.) If the <wiedits> instructions are NOT present and the user asks for lorebook work, do NOT refuse flatly or invent a format \u2014 warmly explain that a World Info book just needs to be open/active in SillyTavern for you to edit it, and offer to proceed the moment it is.',
+    ].join('\n');
+
+
+    // Shipped on EVERY request, not just audits. The auditor doctrine lives inside
+    // the #m passes, so an ordinary "fix this contradiction" arrived with no rule
+    // about the OTHER places the same fact is written \u2014 and a fix to the chat and
+    // the ledger left the snippet, its detail field and the worldbook still saying
+    // the old thing. That is not a partial fix; it MANUFACTURES a contradiction
+    // that did not exist before, because the surfaces now disagree.
+    const CONSISTENCY_LAW = [
+        'ONE FACT, EVERY SURFACE \u2014 binding on every correction, not only on audits:',
+        '- A story fact is written in several places at once: the chat prose (often in MORE than one message), the memory snippet that covers it, that snippet\'s detail/audit field, the ledger dossier for each character involved (CORE / STATE / ARC / THREADS), the notepad, the worldbook entry, and any standing note. Correcting ONE of them and leaving the rest does not half-fix the error \u2014 it CREATES a new contradiction, because the surfaces now disagree with each other.',
+        '- So a fix is never the instance the user pointed at. Name the CLASS of the error, then sweep every surface for every instance of that class and correct them together, in ONE reply. For text that repeats verbatim across chat messages, use a single bulk_replace rather than one edit per message.',
+        '- RIPPLE: a corrected fact can invalidate what was written after it \u2014 a consequence that no longer follows, a reaction to something that did not happen, a count or a date computed from the old value, knowledge a character could only have had under the old version. Follow the correction forward and fix what it breaks, or say plainly what it breaks and why you left it.',
+        '- REPORT THE SWEEP, do not promise it. State what you checked and what you found in each place, with numbers: "chat: 3 instances, all fixed; snippet + its detail: both fixed; Cersei dossier STATE: fixed; worldbook: checked, none; nothing downstream depends on it." If you could not check a surface, say which and why \u2014 never let silence imply it was clean.',
+        '- If a surface is genuinely correct as it stands, say so explicitly. An unmentioned surface reads as an unchecked one.',
     ].join('\n');
 
     // Stored copies of the 2.71 default are auto-upgraded (loadSettings); a
@@ -1974,7 +1990,7 @@
         const rule = settings.allowUserEdits
             ? 'You may edit user-authored messages when the user asks for it.'
             : 'Never propose edits to user-authored messages; they are read-only.';
-        let out = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + BEHAVIOR_RULES + '\n\n' + MESSAGE_TEXT_RULES + '\n\n' + CHAT_EDIT_EXTRAS + '\n\n' + MEMEDIT_RULES;
+        let out = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace('USER_EDIT_RULE', rule) + '\n\n' + BEHAVIOR_RULES + '\n\n' + MESSAGE_TEXT_RULES + '\n\n' + CONSISTENCY_LAW + '\n\n' + CHAT_EDIT_EXTRAS + '\n\n' + MEMEDIT_RULES;
         if (wiCanEdit()) out += '\n\n' + WI_RULES;
         return out;
     }
@@ -2343,16 +2359,18 @@
         let re;
         try { re = new RegExp(settings.memoryKeyPattern, 'i'); }
         catch (e) { re = /summar|ception|memory/i; }
-        const visit = (node) => {
-            if (typeof node === 'string') { cb(node); return; }
-            if (Array.isArray(node)) { node.forEach(visit); return; }
-            if (node && typeof node === 'object') { for (const v of Object.values(node)) visit(v); }
+        // The path is passed as a second argument so a caller can SAY where it found
+        // something. Existing callbacks take one argument and are unaffected.
+        const visit = (node, path) => {
+            if (typeof node === 'string') { cb(node, path); return; }
+            if (Array.isArray(node)) { node.forEach((v, i) => visit(v, path + '[' + i + ']')); return; }
+            if (node && typeof node === 'object') { for (const [k, v] of Object.entries(node)) visit(v, path + '.' + k); }
         };
         for (const [key, val] of Object.entries(md)) {
             if (key === MODULE) continue;
             const extra = key === 'note_prompt' || key === 'cc_critique';
             if (!re.test(key) && !extra) continue;
-            visit(val);
+            visit(val, key);
         }
     }
 
@@ -3474,6 +3492,115 @@
             + '\nEvery other proposal from your last reply is still standing \u2014 do not repeat those.';
     }
 
+
+    // ------------------------------------------------------------------
+    // Ripple scan \u2014 the other places the corrected fact is still wrong
+    // ------------------------------------------------------------------
+    // A prompt rule alone would be a promise. This PROVES the leftovers: it takes
+    // the text an edit removes and finds every other place that exact text still
+    // sits \u2014 other chat messages, memory snippets and their detail fields, ledger
+    // dossiers, the notepad, worldbook entries \u2014 and hands the list back as fact.
+    // A model cannot forget a surface it has been shown a count for.
+
+    // What an edit actually takes OUT: find and replace, minus their shared head
+    // and tail. Changing "Two-fourteen" to "Two-thirty-eight" inside a long anchor
+    // yields "Two-fourteen", not the whole sentence.
+    function removedSpan(find, replace) {
+        const a = String(find == null ? '' : find);
+        if (!a) return '';
+        const b = String(replace == null ? '' : replace);
+        if (!b) return a.trim();
+        let p = 0;
+        while (p < a.length && p < b.length && a.charAt(p) === b.charAt(p)) p++;
+        let sfx = 0;
+        while (sfx < (a.length - p) && sfx < (b.length - p) && a.charAt(a.length - 1 - sfx) === b.charAt(b.length - 1 - sfx)) sfx++;
+        return a.slice(p, a.length - sfx).trim();
+    }
+
+    const RIPPLE_MIN_SPAN = 4;
+    const RIPPLE_MAX_SITES = 12;
+    const RIPPLE_MAX_SPANS = 3;
+    // Deliberately high. An early version capped this at 60 on the theory that a
+    // span appearing in dozens of places is prose, not a fact — but a renamed
+    // character or a wrong title appears in HUNDREDS of messages, and that is
+    // exactly the case where sweeping the class matters most (one bulk_replace).
+    // Only a stopword-scale count is skipped.
+    const RIPPLE_NOISE_CAP = 400;
+
+    function rippleSpans(edits, memEdits) {
+        const counts = new Map();   // span -> how many occurrences this reply already removes
+        const add = (span) => {
+            if (!span || span.length < RIPPLE_MIN_SPAN) return;
+            if (!/[A-Za-z0-9]/.test(span)) return;
+            counts.set(span, (counts.get(span) || 0) + 1);
+        };
+        for (const e of (edits || [])) {
+            if (!e || e.kind === 'mem' || e.kind === 'wi') continue;
+            if (typeof e.find !== 'string') continue;
+            add(removedSpan(e.find, e.replace));
+        }
+        for (const e of (memEdits || [])) {
+            if (!e || typeof e.find !== 'string') continue;
+            add(removedSpan(e.find, e.replace));
+        }
+        return [...counts.entries()]
+            .sort((x, y) => y[0].length - x[0].length)
+            .slice(0, RIPPLE_MAX_SPANS)
+            .map(([span, removed]) => ({ span, removed }));
+    }
+
+    async function rippleScan(spans) {
+        const chat = ctx().chat || [];
+        const out = [];
+        let wiEntries = null;
+        for (const { span, removed } of spans) {
+            const sites = [];
+            let total = 0;
+            for (let i = 0; i < chat.length; i++) {
+                const n = countOccurrences(String((chat[i] && chat[i].mes) || ''), span);
+                if (n) { total += n; sites.push({ kind: 'chat', label: 'message #' + i, n }); }
+            }
+            memStrings((t, path) => {
+                const n = countOccurrences(String(t || ''), span);
+                if (n) { total += n; sites.push({ kind: 'mem', label: 'memory ' + (path || ''), n }); }
+            });
+            if (wiActive()) {
+                if (wiEntries === null) {
+                    wiEntries = [];
+                    try {
+                        for (const book of wiEffectiveBooks()) {
+                            const data = await wiLoad(book);
+                            if (!data) continue;
+                            for (const e of wiEntryList(data)) {
+                                wiEntries.push({ label: 'worldbook ' + book + '#' + e.uid + ' "' + ((e.comment || '').trim() || 'untitled') + '"', text: String(e.content || '') });
+                            }
+                        }
+                    } catch (err) { console.warn(LOG, 'ripple worldbook scan failed', err); wiEntries = []; }
+                }
+                for (const e of wiEntries) {
+                    const n = countOccurrences(e.text, span);
+                    if (n) { total += n; sites.push({ kind: 'wi', label: e.label, n }); }
+                }
+            }
+            if (!total || total > RIPPLE_NOISE_CAP) continue;
+            const leftover = total - removed;      // this reply already removes `removed` of them
+            if (leftover > 0) out.push({ span, leftover, total, sites: sites.slice(0, RIPPLE_MAX_SITES), truncated: sites.length > RIPPLE_MAX_SITES });
+        }
+        return out;
+    }
+
+    function ripplePrompt(found) {
+        const body = found.map(f => '\u2022 \u201C' + f.span + '\u201D \u2014 ' + f.total + ' occurrence(s) exist; your reply corrects ' + (f.total - f.leftover) + ', leaving ' + f.leftover + ' untouched at:\n'
+            + f.sites.map(x => '    - ' + x.label + (x.n > 1 ? ' (\u00d7' + x.n + ')' : '')).join('\n')
+            + (f.truncated ? '\n    - \u2026and more' : '')).join('\n');
+        return '[RIPPLE CHECK \u2014 the same text still sits elsewhere; found by a code scan, so these are facts]\n' + body
+            + '\n\nA fix that lands on one surface and not the others does not half-solve the error \u2014 it manufactures a new one, because the surfaces now disagree.'
+            + '\nRe-send your reply with the matching corrections included: chat messages (one bulk_replace when the text repeats verbatim), memory snippets AND their detail/audit fields, the ledger dossier for every character involved, the worldbook entry.'
+            + '\nWhere an occurrence is genuinely correct as it stands \u2014 a quoted mistake, a different subject, a deliberate echo \u2014 name it and say why. Do not silently skip one.'
+            + '\nThen check the RIPPLE: does anything written AFTER the corrected fact depend on the old version? Fix what it breaks, or state what it breaks and why you left it.'
+            + '\nKeep every proposal from your last reply that is still right; this is an addition, not a replacement.';
+    }
+
     // Chat edits whose "find" cannot possibly match because the model never read the
     // target message in full: it is older than the full-text window (winStart) and was
     // not fetched, so the "find" is a reconstruction. These get auto-fetched + re-proposed.
@@ -3632,6 +3759,7 @@
             const fetchedIds = new Set();    // ids served WHOLE
             const fetchedRefs = new Set();   // id#part keys actually served
             let anchorRepaired = false;      // the anchor correction gets one round, not a loop
+            let rippleChecked = false;       // so does the cross-surface sweep
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
                 const split = await callLLMSmart(messages, live);
@@ -3686,6 +3814,23 @@
                         addBubble('note', anote); pushHistoryTo(sessObj, 'note', anote);
                         messages.push({ role: 'assistant', content: reply });
                         messages.push({ role: 'user', content: anchorRepairPrompt(problems) });
+                        continue;
+                    }
+                }
+                // The other half of a correct fix: everywhere ELSE the old text still
+                // sits. Proven in code and handed back, so the sweep cannot be skipped.
+                if (round < rounds && !rippleChecked) {
+                    let found = [];
+                    try {
+                        const spans = rippleSpans(parseEdits(reply).edits, parseMemEdits(reply).edits);
+                        if (spans.length) found = await rippleScan(spans);
+                    } catch (_) { /* ignore */ }
+                    if (found.length) {
+                        rippleChecked = true;   // one sweep round, never a loop
+                        const rnote = '\u27F3 Ripple check: the corrected text still appears in ' + found.reduce((a, f) => a + f.leftover, 0) + ' other place(s) \u2014 asked for the matching fixes before staging.';
+                        addBubble('note', rnote); pushHistoryTo(sessObj, 'note', rnote);
+                        messages.push({ role: 'assistant', content: reply });
+                        messages.push({ role: 'user', content: ripplePrompt(found) });
                         continue;
                     }
                 }
@@ -3886,17 +4031,22 @@
         return r.audit;
     }
 
-    async function auditAsk(systemTexts, userText, rounds, tick) {
+    // stats.calls counts EVERY model call, including the anchor and ripple rounds:
+    // rounds spent inside here were invisible to the audit's call budget, so a
+    // 40-call budget could quietly spend 80.
+    async function auditAsk(systemTexts, userText, rounds, tick, stats) {
         const messages = systemTexts.filter(Boolean).map(t => ({ role: 'system', content: t }));
         messages.push({ role: 'user', content: userText });
         let reply = '';
         let anchorFixed = false;
+        let rippleFixed = false;
         // The audit gets the anchor pre-flight too, and always at least one round for
         // it: a sweep that stages dead cards makes the user do the extension's job.
-        const maxRounds = Math.max(rounds, 1);
+        const maxRounds = Math.max(rounds, 2);   // room for the anchor round AND the ripple round
         for (let round = 0; round <= maxRounds; round++) {
             if (stopRequested) break;
             const sp = await callLLMSmart(messages, tick ? tick.onPartial : undefined);
+            if (stats) stats.calls++;
             reply = (sp && sp.rest) ? sp.rest : '';
             if (round === maxRounds) break;
             if (!anchorFixed) {
@@ -3906,6 +4056,19 @@
                     anchorFixed = true;
                     messages.push({ role: 'assistant', content: reply });
                     messages.push({ role: 'user', content: anchorRepairPrompt(problems) });
+                    continue;
+                }
+            }
+            if (!rippleFixed) {
+                let found = [];
+                try {
+                    const spans = rippleSpans(parseEdits(reply).edits, parseMemEdits(reply).edits);
+                    if (spans.length) found = await rippleScan(spans);
+                } catch (_) { /* ignore */ }
+                if (found.length) {
+                    rippleFixed = true;
+                    messages.push({ role: 'assistant', content: reply });
+                    messages.push({ role: 'user', content: ripplePrompt(found) });
                     continue;
                 }
             }
@@ -4031,7 +4194,7 @@
         const tick = busyTicker(busy, 'deep audit');
         const report = [];
         const doubts = new Set();   // message ids pass 3 could not settle from memory alone
-        let calls = 0;
+        const stats = { calls: 0 };   // every model call, correction rounds included
         const note = (t) => { addBubble('note', t); pushHistoryTo(sessObj, 'note', t); };
         const alive = () => {
             if (stopRequested) return false;
@@ -4045,7 +4208,7 @@
             if (wantRestart || fromM) { st.cursor = fromM ? Math.min(chat.length - 1, Math.max(0, Number(fromM[1]))) : 0; st.phase = 'structure'; }
             const resumed = !wantRestart && !fromM && st.cursor > 0;
             const budget = numSetting(settings.auditMaxCalls, defaults.auditMaxCalls, 1, 400);
-            const overBudget = () => calls >= budget;
+            const overBudget = () => stats.calls >= budget;
             const visible = visibleIds(chat);
             const ghostCount = chat.length - visible.length;
             const todo = visible.filter(i => i >= st.cursor);
@@ -4079,8 +4242,7 @@
                         AUDITOR_DOCTRINE,
                         '[STRUCTURE FLAGS \u2014 proven by a code scan; treat as fact]\n' + formatStructureFlags(batch),
                         '[MESSAGES UNDER AUDIT]\n' + fullTextOf(batch.map(r => r.id), 0),
-                    ], AUDIT_STRUCTURE_PROMPT + extraLine, 0, tick);
-                    calls++;
+                    ], AUDIT_STRUCTURE_PROMPT + extraLine, 0, tick, stats);
                     if (!alive()) break;
                     ingestProposals(reply);
                     const prose = stripBlocks(reply).trim();
@@ -4113,8 +4275,7 @@
                         '[STORY MEMORY]\n' + memText,
                         ribIds.length ? '[CONTEXT RIBBON \u2014 already audited, do not re-report]\n' + fullTextOf(ribIds, 0) : '',
                         '[MESSAGES UNDER AUDIT \u2014 #' + start + ' to #' + end + ']\n' + fullTextOf(ids, 0),
-                    ], AUDIT_CONTINUITY_PROMPT + extraLine, rounds, tick);
-                    calls++;
+                    ], AUDIT_CONTINUITY_PROMPT + extraLine, rounds, tick, stats);
                     if (!alive()) break;
                     ingestProposals(reply);
                     const prose = stripBlocks(reply).trim();
@@ -4152,8 +4313,7 @@
                             orderFlags.length ? '[ORDER FLAGS \u2014 proven by a code scan of the coverage ranges]\n' + formatMemoryFlags(orderFlags) : '',
                             carry.length ? '[FINDINGS SO FAR \u2014 from earlier sections; do not re-report]\n' + carry.join('\n').slice(0, 6000) : '',
                             '[STORY MEMORY' + (chunks.length > 1 ? ' \u2014 section ' + (k + 1) + ' of ' + chunks.length : '') + ']\n' + chunks[k],
-                        ], AUDIT_MEMORY_PROMPT + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick);
-                        calls++;
+                        ], AUDIT_MEMORY_PROMPT + extraLine, Math.max(1, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4)), tick, stats);
                         if (!alive()) break;
                         ingestProposals(reply);
                         for (const id of parseVerify(reply)) doubts.add(id);
@@ -4174,8 +4334,7 @@
                             '[MEMORY SPINE \u2014 every entry in story order. CLIPPED 90-character extracts: never the source of a "find".]\n' + spine,
                             orderFlags.length ? '[ORDER FLAGS]\n' + formatMemoryFlags(orderFlags) : '',
                             carry.length ? '[FINDINGS SO FAR]\n' + carry.join('\n').slice(0, 8000) : '(no section raised a finding)',
-                        ], AUDIT_CROSS_PROMPT + extraLine, 0, tick);
-                        calls++;
+                        ], AUDIT_CROSS_PROMPT + extraLine, 0, tick, stats);
                         if (alive()) {
                             ingestProposals(reply);
                             for (const id of parseVerify(reply)) doubts.add(id);
@@ -4207,8 +4366,7 @@
                             AUDITOR_DOCTRINE,
                             '[STORY MEMORY]\n' + memText,
                             '[ORIGINAL MESSAGES UNDER DOUBT]\n' + fullTextOf(batch, 0),
-                        ], AUDIT_VERIFY_PROMPT + extraLine, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4), tick);
-                        calls++;
+                        ], AUDIT_VERIFY_PROMPT + extraLine, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4), tick, stats);
                         if (!alive()) break;
                         ingestProposals(reply);
                         const prose = stripBlocks(reply).trim();
@@ -4227,7 +4385,7 @@
             const hitBudget = overBudget();
             if (hitBudget && !stopped) note('\u23F8 Call budget reached (' + budget + '). The resume point is saved \u2014 run #m again to continue, or raise the budget in settings.');
             const head = (stopped ? '\u23F9 Deep audit STOPPED early' : hitBudget ? '\u23F8 Deep audit PAUSED at its call budget' : '\u2705 Deep audit complete')
-                + ' \u2014 ' + calls + ' model call(s), ' + chat.length + ' message(s) scanned in code, ' + visible.length + ' visible message(s) swept'
+                + ' \u2014 ' + stats.calls + ' model call(s), ' + chat.length + ' message(s) scanned in code, ' + visible.length + ' visible message(s) swept'
                 + ((stopped || hitBudget) ? '. It resumes from #' + auditState().cursor + ' next time you run #m.' : '.');
             const body = report.length ? report.join('\n\n') : 'Nothing to report: no structural faults, no continuity contradictions, no memory conflicts found.';
             pushHistoryTo(sessObj, 'assistant', head + '\n\n' + body);

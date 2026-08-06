@@ -1367,7 +1367,13 @@ ctx.ConnectionManagerRequestService = {
     sendRequest: async (pid, messages) => {
         const all = messages.map(m => String(m.content || '')).join('\n');
         if (all.includes('PASS 1 of 4')) { passes.push('structure'); return 'fixed'; }
-        if (all.includes('PASS 2 of 4')) { passes.push('continuity'); return 'Scene 3 contradicts the memory.\n<edits>[{"id":3,"find":"iron","replace":"steel"}]</edits>'; }
+        if (all.includes('PASS 2 of 4')) {
+            // A window can legitimately take more than one call now (anchor / ripple
+            // correction rounds), so count WINDOWS by their range marker, not calls.
+            const w = all.match(/MESSAGES UNDER AUDIT — #(\d+) to #(\d+)/);
+            if (w) passes.push('continuity:' + w[1] + '-' + w[2]);
+            return 'Scene 3 contradicts the memory.\n<edits>[{"id":3,"find":"iron","replace":"steel"}]</edits>';
+        }
         if (all.includes('PASS 3 of 4')) { passes.push('memory'); return 'Snippet 2 looks thin.\n<verify>[3]</verify>'; }
         if (all.includes('PASS 4 of 4')) { passes.push('verify'); return 'DOUBTS RESOLVED'; }
         passes.push('other'); return 'x';
@@ -1376,8 +1382,10 @@ ctx.ConnectionManagerRequestService = {
 document.getElementById('cc_input').value = '#m';
 clickFresh('cc_send');
 await sleep(1400);
-ok(passes.filter(p => p === 'continuity').length === 3, 'the continuity pass walked the WHOLE 12-message log in 4-message windows (got ' + passes.filter(p => p === 'continuity').length + ')');
+const windows = [...new Set(passes.filter(p => p.indexOf('continuity:') === 0))];
+ok(windows.length === 3, 'the continuity pass walked the WHOLE 12-message log in 4-message windows (got ' + windows.length + ': ' + windows.join(' ') + ')');
 ok(passes.includes('memory') && passes.includes('verify'), 'the memory pass ran unasked, and the verify pass fired because it raised a doubt');
+ok(/Deep audit complete — \d+ model call\(s\)/.test(ccLogText().join('\n').replace(/&#\d+;/g, '')) || /model call\(s\)/.test(ccLogText().join('\n')), 'the verdict reports a call count that includes the correction rounds');
 ok(!passes.includes('other'), 'every audit call carried one of the four pass contracts');
 const auditLog = ccLogText().join('\n');
 ok(/Deep audit complete/.test(auditLog), 'the audit ends with a consolidated verdict');
@@ -1864,6 +1872,90 @@ document.getElementById('cc_input').value = 'now fix gamma too';
 clickFresh('cc_send');
 await sleep(900);
 ok(skipNotes() === skipsBefore2, 'a pending fix whose anchor is still good is NOT retired by an unrelated new proposal (' + skipsBefore2 + ' -> ' + skipNotes() + ')');
+
+console.log('== v2.77.0: a fix lands on EVERY surface, not just the one pointed at ==');
+// The auditor doctrine only shipped inside the #m passes, so an ordinary "fix this
+// contradiction" arrived with no rule about the other places the same fact is
+// written — and a fix to the chat and the ledger left the snippet, its detail
+// field and the worldbook still saying the old thing. That does not half-fix the
+// error; it manufactures a new one, because the surfaces now disagree.
+dismissPending();
+CA.profileId = 'gate-profile';
+CA.streaming = false;
+CA.recentFull = 8;
+CA.fetchRounds = 3;
+CA.fullTextCap = 0;
+
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'The bell rang at Two-fourteen and the hall emptied.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'She remembered Two-fourteen as the hour it began.' });
+ctx.chatMetadata.summary_memory = 'SNIPPET: the bell rang at Two-fourteen. (covers chat messages #0 to #1)';
+ctx.chatMetadata.summary_ledger = 'Cersei — STATE: waiting since Two-fourteen.';
+
+let rTurn = 0;
+const rSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        rSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        rTurn++;
+        if (rTurn === 1) return 'Fixed the time.\n<edits>[{"id":0,"find":"rang at Two-fourteen and","replace":"rang at Two-thirty-eight and","reason":"wrong hour"}]</edits>';
+        return 'Swept everywhere.\n<edits>[{"id":1,"find":"remembered Two-fourteen as","replace":"remembered Two-thirty-eight as","reason":"same class"}]</edits>\n<memedits>[{"find":"the bell rang at Two-fourteen.","replace":"the bell rang at Two-thirty-eight.","reason":"snippet"},{"find":"STATE: waiting since Two-fourteen.","replace":"STATE: waiting since Two-thirty-eight.","reason":"ledger"}]</memedits>';
+    },
+};
+document.getElementById('cc_input').value = 'the bell time is wrong, fix it';
+clickFresh('cc_send');
+await sleep(1100);
+const rippleLog = ccLogText().join('\n');
+ok(/Ripple check: the corrected text still appears in 3 other place\(s\)/.test(rippleLog), 'the leftovers are counted in code before anything is staged');
+ok(rSeen.length >= 2 && /RIPPLE CHECK/.test(rSeen[1]), 'the model is handed the list and asked to sweep, in the same run');
+ok(/message #1/.test(rSeen[1]), 'the other CHAT message carrying the same text is named');
+ok(/memory summary_memory/.test(rSeen[1]) && /memory summary_ledger/.test(rSeen[1]), 'the memory snippet AND the ledger dossier are named, with their paths');
+ok(/manufactures a new one, because the surfaces now disagree/.test(rSeen[1]), 'and told why a one-surface fix is worse than no fix');
+ok(/does anything written AFTER the corrected fact depend on the old version/.test(rSeen[1]), 'the downstream ripple is demanded too, not just the duplicates');
+
+console.log('== v2.77.0: the law ships on ordinary requests, not only on audits ==');
+ok(rSeen[0].includes('ONE FACT, EVERY SURFACE'), 'every request carries the consistency law');
+ok(/ledger dossier for each character involved \(CORE \/ STATE \/ ARC \/ THREADS\)/.test(rSeen[0]), 'it names the surfaces concretely rather than saying "be thorough"');
+ok(/REPORT THE SWEEP, do not promise it/.test(rSeen[0]), 'and demands evidence with numbers, not a claim of thoroughness');
+CA.systemPrompt = 'MY OWN CUSTOM PROMPT. USER_EDIT_RULE';
+let lawSeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { lawSeen = messages.map(m => String(m.content || '')).join('\n'); return 'ok'; } };
+dismissPending();
+document.getElementById('cc_input').value = 'hello';
+clickFresh('cc_send');
+await sleep(500);
+ok(lawSeen.includes('ONE FACT, EVERY SURFACE'), 'the law survives a fully customized system prompt');
+delete CA.systemPrompt;
+
+console.log('== v2.77.0: the sweep does not fire on noise or on a complete fix ==');
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'A single line with a UNIQUEPHRASE in it.' });
+ctx.chatMetadata.summary_memory = 'nothing relevant here';
+ctx.chatMetadata.summary_ledger = 'nothing relevant here either';
+let oneShot = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async () => { oneShot++; return '<edits>[{"id":0,"find":"a UNIQUEPHRASE in","replace":"a REPLACEDPHRASE in","reason":"only occurrence"}]</edits>'; } };
+document.getElementById('cc_input').value = 'fix the unique phrase';
+clickFresh('cc_send');
+await sleep(700);
+ok(oneShot === 1, 'a fix with no leftovers anywhere costs no extra round (got ' + oneShot + ')');
+
+// A span in dozens of places is the case where sweeping matters MOST — a renamed
+// character or a wrong title is exactly that shape — so the sweep fires, the sites
+// are capped for readability, and one bulk_replace is offered instead of 30 edits.
+dismissPending();
+ctx.chat.length = 0;
+for (let i = 0; i < 30; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Ser Kettleblack stood at the door again that evening.' });
+let manyCalls = 0;
+let manySeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { manyCalls++; manySeen = messages.map(m => String(m.content || '')).join('\n'); return '<edits>[{"id":29,"find":"Ser Kettleblack stood","replace":"Ser Osmund stood","reason":"renamed"}]</edits>'; } };   // #29 is inside the full-text window, so the blind-edit fetch is not in play
+document.getElementById('cc_input').value = 'rename the knight';
+clickFresh('cc_send');
+await sleep(900);
+ok(manyCalls === 2, 'a rename spanning 30 messages DOES raise the sweep — that is the case it exists for (got ' + manyCalls + ' calls)');
+ok(/29 untouched/.test(manySeen) || /leaving 29 untouched/.test(manySeen), 'the count of untouched instances is exact');
+ok(/and more/.test(manySeen), 'the site list is capped for readability rather than dumping 30 lines');
+ok(/one bulk_replace when the text repeats verbatim/.test(manySeen), 'and one bulk_replace is offered instead of 30 separate edits');
 
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
