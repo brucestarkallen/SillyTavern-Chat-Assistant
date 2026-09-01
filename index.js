@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.77.0';
+    const VERSION = '2.78.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -3942,11 +3942,28 @@
         const supersedeLabels = parseSupersede(reply);
         if (supersedeLabels.length && pendingEdits.length) {
             const labeledNow = labelForEdits(pendingEdits);
+            // Labels are the contract, but a near-miss ("memory fix #1", odd
+            // spacing/case) should still land: compare normalized. A label that
+            // matches NOTHING must be reported — otherwise the model believes it
+            // withdrew a card it didn't, announces success, and the dead card is
+            // re-listed next turn: the silent half of the withdrawal bug.
+            const normLbl = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+            const unmatchedSup = [];
             for (const lbl of supersedeLabels) {
-                const norm = lbl.trim().toLowerCase();
-                const hit = labeledNow.find(x => x.label.toLowerCase() === norm);
-                if (hit) { if (hit.edit.kind === 'wi') hit.edit.editStatus = 'skipped'; else hit.edit.status = 'skipped'; didSupersede++; }
+                const norm = normLbl(lbl);
+                if (!norm) continue;
+                const hit = labeledNow.find(x => normLbl(x.label) === norm);
+                if (hit) {
+                    const stH = hit.edit.kind === 'wi' ? hit.edit.editStatus : hit.edit.status;
+                    if (stH === 'pending' || (typeof stH === 'string' && stH.indexOf('failed') === 0)) {
+                        if (hit.edit.kind === 'wi') hit.edit.editStatus = 'skipped'; else hit.edit.status = 'skipped';
+                        didSupersede++;
+                    }
+                } else unmatchedSup.push(lbl);
             }
+            if (unmatchedSup.length) addBubble('note', '\u26A0 <supersede> named ' + unmatchedSup.map(s => '"' + s + '"').join(', ') + ' but no pending proposal carries that label \u2014 nothing was withdrawn for those. Copy the exact labels from PENDING PROPOSALS.');
+        } else if (supersedeLabels.length && !pendingEdits.length) {
+            addBubble('note', '\u26A0 The assistant sent a <supersede> block but there are no pending proposals \u2014 nothing was withdrawn.');
         }
         if (allEdits.length) {
             editsCollapsed = false;
@@ -4011,7 +4028,7 @@
                 if (intraDups) addBubble('note', intraDups + ' duplicate proposal(s) within the reply merged.');
             }
         }
-        if (didSupersede) addBubble('note', '\u21A9 Auto-skipped ' + didSupersede + ' proposal(s) the assistant replaced \u2014 "Apply all" will ignore them.');
+        if (didSupersede) addBubble('note', '\u21A9 Auto-skipped ' + didSupersede + ' proposal(s) the assistant ' + (allEdits.length ? 'replaced' : 'withdrew') + ' \u2014 "Apply all" will ignore them.');
         if (allEdits.length || didSupersede) renderEditCards();
     }
 
@@ -5846,7 +5863,7 @@
             return typeof stx === 'string' && stx.indexOf('failed') === 0;
         }).map(function (x) { return x.label; });
         const failNote = failed.length
-            ? ('\n\nSOME PROPOSALS FAILED TO APPLY: ' + failed.join(', ') + '. They failed because the "find" excerpt did not match the source text exactly \u2014 either it was paraphrased instead of copied, OR it tried to do too much at once. To fix each: for a CHAT edit, if you do NOT already have that message\'s FULL text above, <fetch> that message first and copy the "find" verbatim; for a MEMORY edit, copy the "find" CHARACTER-FOR-CHARACTER from [STORY MEMORY]. Never paraphrase. CRUCIAL: keep each edit TINY \u2014 correct only the specific wrong words. A "find" must be ONE contiguous run that ALREADY EXISTS verbatim: do NOT stitch two fields or two thread entries together (they are stored separately and can never match as one block), and find/replace can NEVER add new sentences or new threads (it only changes text that is already there). If a big change is needed, break it into several tiny edits or a single whole-field "path" replace. If unsure, the one wrong word can be the whole "find" (e.g. find "Two-fourteen", replace "Two-thirty-eight"). Do not drop them silently.')
+            ? ('\n\nSOME PROPOSALS FAILED TO APPLY: ' + failed.join(', ') + '. They failed because the "find" excerpt did not match the source text exactly \u2014 either it was paraphrased instead of copied, OR it tried to do too much at once. To fix each: for a CHAT edit, if you do NOT already have that message\'s FULL text above, <fetch> that message first and copy the "find" verbatim; for a MEMORY edit, copy the "find" CHARACTER-FOR-CHARACTER from [STORY MEMORY]. Never paraphrase. CRUCIAL: keep each edit TINY \u2014 correct only the specific wrong words. A "find" must be ONE contiguous run that ALREADY EXISTS verbatim: do NOT stitch two fields or two thread entries together (they are stored separately and can never match as one block), and find/replace can NEVER add new sentences or new threads (it only changes text that is already there). If a big change is needed, break it into several tiny edits or a single whole-field "path" replace. If unsure, the one wrong word can be the whole "find" (e.g. find "Two-fourteen", replace "Two-thirty-eight"). If one does NOT actually need re-proposing \u2014 the current text is already correct, or another applied edit already covered it \u2014 do NOT re-send it and do NOT just say so: WITHDRAW it by naming its exact label in a <supersede> block. The block is the only action that takes a proposal off this list; prose removes nothing. Either way, every failed proposal ends this turn re-proposed corrected or withdrawn \u2014 never dropped silently.')
             : '';
         const resolvedNote = resolved.length
             ? '\n\nResolved earlier (applied or skipped \u2014 do NOT re-propose these): ' + resolved.map(function (x) {
@@ -5858,7 +5875,7 @@
             (lines.length ? lines.join('\n') : '(none awaiting action)') +
             resolvedNote +
             failNote +
-            '\n\nWhen you next propose edits: only propose NEW fixes. If you are CORRECTING or REPLACING any pending proposal above, do NOT re-list it as-is \u2014 name its exact label(s) in a <supersede> block (e.g. <supersede>Memory fix 1, Chat fix 2</supersede>) and give the corrected version as a fresh edit; the superseded ones are auto-skipped so "Apply all" stays clean. Refer to these by their labels when you talk to the user.';
+            '\n\nWhen you next propose edits: only propose NEW fixes. If you are CORRECTING or REPLACING any pending proposal above, do NOT re-list it as-is \u2014 name its exact label(s) in a <supersede> block (e.g. <supersede>Memory fix 1, Chat fix 2</supersede>) and give the corrected version as a fresh edit; the superseded ones are auto-skipped so "Apply all" stays clean. If one is simply WRONG, MOOT or ALREADY RESOLVED \u2014 the current text already says the right thing, or another applied edit covered it \u2014 WITHDRAW it the same way: name its label(s) in a <supersede> block and send no replacement for it. The block is the ONLY thing that takes a proposal off this list \u2014 saying "dropping it" in prose changes nothing, and a dead proposal left unwithdrawn is re-listed here every turn. Refer to these by their labels when you talk to the user.';
     }
 
     // Parse a <supersede> block: pending-proposal labels the new reply replaces.
@@ -6019,7 +6036,7 @@
         });
         el('cc_reproposefail')?.addEventListener('click', () => {
             if (running) { toast('Busy \u2014 wait for the current run to finish.', 'warning'); return; }
-            send('The failed proposals listed under PENDING PROPOSALS could not be applied. Re-read the CURRENT text of each target (fetch chat messages if you only have previews; re-read [STORY MEMORY] for memory fixes), then re-propose each fix corrected \u2014 copy every "find" verbatim from the current text. Do not re-send proposals that are no longer needed.');
+            send('The failed proposals listed under PENDING PROPOSALS could not be applied. Re-read the CURRENT text of each target (fetch chat messages if you only have previews; re-read [STORY MEMORY] for memory fixes), then re-propose each fix corrected \u2014 copy every "find" verbatim from the current text. For any that is no longer needed (already fixed by another edit, moot, or wrong from the start), do NOT re-propose it and do NOT just say so in prose \u2014 WITHDRAW it by naming its exact label in a <supersede> block (e.g. <supersede>Memory fix 1</supersede>); the block is the only thing that removes it from the pending list. Every failed proposal ends this turn either re-proposed corrected or withdrawn via <supersede> \u2014 none may be left sitting.');
         });
         el('cc_toggleedits')?.addEventListener('click', () => {
             editsCollapsed = !editsCollapsed;

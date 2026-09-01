@@ -1957,6 +1957,109 @@ ok(/29 untouched/.test(manySeen) || /leaving 29 untouched/.test(manySeen), 'the 
 ok(/and more/.test(manySeen), 'the site list is capped for readability rather than dumping 30 lines');
 ok(/one bulk_replace when the text repeats verbatim/.test(manySeen), 'and one bulk_replace is offered instead of 30 separate edits');
 
+console.log('== v2.78.0: a dead proposal is WITHDRAWN by block, never by prose ==');
+// The protocol taught propose / correct / apply-skip but no WITHDRAW: the
+// failed-apply retry said "do not re-send proposals that are no longer needed"
+// and the pending block said "do not drop them silently", so a proposal the
+// model judged dead got a prose "dropping it" while the card stayed staged and
+// was re-listed every turn — the loop this pack exists to kill. <supersede>
+// with no replacement already worked in code; it was never taught, and an
+// unmatched label failed silently on top of that.
+// pendingEdits accumulates across this whole file (dismissPending is a no-op
+// here — the card DOM is never built), so the staged card's label is NOT
+// "Memory fix 1": the mock reads its exact label out of the PENDING PROPOSALS
+// block it is handed, exactly like the real model is told to.
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'A quiet scene with nothing to fix here.' });
+ctx.chatMetadata.summary_memory = 'DELTA line: the cook burned the stew at noon.';
+ctx.chatMetadata.summary_ledger = 'nothing relevant here';
+
+const wSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        wSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        return '<memedits>[{"find":"the cook burned the stew at noon.","replace":"the cook burned the stew at dusk.","reason":"wrong time"}]</memedits>';
+    },
+};
+document.getElementById('cc_input').value = 'the stew time is wrong';
+clickFresh('cc_send');
+await sleep(900);
+ok(/proposed memory edits below/.test(ccLogText().slice(-3).join(' ')), 'a withdrawable card is staged first');
+
+// Turn 2: the model re-checks, judges the staged fix moot, and withdraws it by
+// naming the exact label it just read in PENDING PROPOSALS — no replacement.
+let withdrewBefore = (ccLogText().join('\n').match(/the assistant withdrew/gi) || []).length;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const joined = messages.map(m => String(m.content || '')).join('\n');
+        wSeen.push(joined);
+        const lm = joined.match(/(Memory fix \d+) \[memory\][^\n]*burned the stew/);
+        return 'Re-checked the memory \u2014 another edit already covered it, so the staged fix is moot.\n<supersede>' + (lm ? lm[1] : 'Memory fix 1') + '</supersede>';
+    },
+};
+document.getElementById('cc_input').value = 'actually it is already covered';
+clickFresh('cc_send');
+await sleep(900);
+const wLog = ccLogText().join('\n');
+ok((wLog.match(/the assistant withdrew/gi) || []).length > withdrewBefore, 'a supersede block with NO replacement withdraws the dead card — and the note says "withdrew", not "replaced"');
+const wLastSeen = wSeen[wSeen.length - 1] || '';
+ok(/WITHDRAW it the same way/.test(wLastSeen) && /prose changes nothing/.test(wLastSeen), 'the pending block the model just read teaches the withdrawal fork — the block is the only thing that removes a proposal');
+ok(/Memory fix \d+ \[memory\]/.test(wLastSeen), 'and the card was listed there under the exact label the model named back');
+
+console.log('== v2.78.0: a near-miss label still lands, an unmatched one is loud ==');
+// Near-miss: "memory fix #N" (case/hash/spacing slop) must still withdraw.
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        wSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        return '<memedits>[{"find":"the cook burned the stew at noon.","replace":"the cook burned the stew at dusk.","reason":"staged again"}]</memedits>';
+    },
+};
+document.getElementById('cc_input').value = 'stage the stew fix again';
+clickFresh('cc_send');
+await sleep(900);
+withdrewBefore = (ccLogText().join('\n').match(/the assistant withdrew/gi) || []).length;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const joined = messages.map(m => String(m.content || '')).join('\n');
+        wSeen.push(joined);
+        const lm = joined.match(/Memory fix (\d+) \[memory\][^\n]*burned the stew/);
+        return 'Withdrawing it.\n<supersede>memory  fix #' + (lm ? lm[1] : '1') + '</supersede>';
+    },
+};
+document.getElementById('cc_input').value = 'never mind, withdraw it';
+clickFresh('cc_send');
+await sleep(900);
+ok((ccLogText().join('\n').match(/the assistant withdrew/gi) || []).length > withdrewBefore, 'a sloppy label ("memory  fix #N") still withdraws the card');
+
+// Unmatched: a label nothing carries must be reported BY NAME — before v2.78 the
+// model announced a dismissal that never happened and the card stayed staged.
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        wSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        return '<memedits>[{"find":"the cook burned the stew at noon.","replace":"the cook burned the stew at dusk.","reason":"third staging"}]</memedits>';
+    },
+};
+document.getElementById('cc_input').value = 'stage it once more';
+clickFresh('cc_send');
+await sleep(900);
+withdrewBefore = (ccLogText().join('\n').match(/the assistant withdrew/gi) || []).length;
+ctx.ConnectionManagerRequestService = { sendRequest: async () => 'That one is dead.\n<supersede>Worldbook fix 77</supersede>' };
+document.getElementById('cc_input').value = 'withdraw the worldbook one';
+clickFresh('cc_send');
+await sleep(900);
+const uLog = ccLogText().slice(-3).join('\n');
+ok(/no pending proposal carries that label/.test(uLog) && /Worldbook fix 77/.test(uLog), 'an unmatched supersede label is reported by name instead of silently doing nothing');
+ok((ccLogText().join('\n').match(/the assistant withdrew/gi) || []).length === withdrewBefore, 'and the unmatched label withdrew NOTHING — the staged card survives');
+
+console.log('== v2.78.0: every prompt that governs the failed loop teaches the fork ==');
+// The retry button and the failed-proposal coaching are not reachable through
+// this harness's DOM (the card panel is never built), so these are witnessed in
+// source — the same strings the live model reads.
+ok(/WITHDRAW it by naming its exact label in a <supersede> block/.test(SRC) && /none may be left sitting/.test(SRC), 'the failed-apply retry commands withdrawal, not inaction');
+ok(/never dropped silently/.test(SRC) && /WITHDRAW it by naming its exact label in a <supersede> block/.test(SRC), 'the failed-proposal coaching ends in the re-propose-or-withdraw fork');
+ok(!/Do not re-send proposals that are no longer needed/.test(SRC), 'the old "just do not re-send it" instruction — the inaction that caused the loop — is gone');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
