@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.79.0';
+    const VERSION = '2.80.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -1936,8 +1936,14 @@
     function buildContextBlock() {
         const chat = ctx().chat || [];
         const n = numSetting(settings.recentFull, defaults.recentFull, 0, 100);
-        const ids = [];
-        for (let i = Math.max(0, chat.length - n); i < chat.length; i++) ids.push(i);
+        // The window counts VISIBLE messages, not raw chat rows. A ghosted row is
+        // already represented by its memory snippet — serving it whole in the
+        // window pays the same rent twice — and a hidden one was deliberately
+        // removed from AI context, so leaking it back through the full-text
+        // window would defeat the hide. "Recent msgs sent in full: 100" over a
+        // chat with 14 visible messages reads exactly those 14, not the last 100
+        // raw rows. (Fetch can still pull any id on demand, ghosted included.)
+        const ids = visibleIds(chat).slice(-n);
         const base = [
             '[STORY MEMORY]',
             gatherMemory(),
@@ -3609,9 +3615,10 @@
     }
 
     // Chat edits whose "find" cannot possibly match because the model never read the
-    // target message in full: it is older than the full-text window (winStart) and was
+    // target message in full: it is outside the full-text window (winSet — the last
+    // N VISIBLE messages, the same set buildContextBlock serves) and was
     // not fetched, so the "find" is a reconstruction. These get auto-fetched + re-proposed.
-    function blindEditTargets(edits, winStart, fetchedIds) {
+    function blindEditTargets(edits, winSet, fetchedIds) {
         const ids = [];
         for (const e of (edits || [])) {
             if (!e || e.kind !== 'chat' || e.bulk || !Number.isInteger(e.id)) continue;
@@ -3622,7 +3629,7 @@
         }
         // "Fetched" only counts when the copy served was the WHOLE message: a part
         // is not a read, and a find copied out of a slice is as blind as one invented.
-        return [...new Set(ids)].filter(id => (id < winStart || !msgServedWhole(id))
+        return [...new Set(ids)].filter(id => (!(winSet && winSet.has(id)) || !msgServedWhole(id))
             && !(fetchedIds && fetchedIds.has && fetchedIds.has(id)));
     }
 
@@ -3797,10 +3804,12 @@
                 // that message for it and have it re-propose against the exact text — so a
                 // correct edit happens automatically instead of a "not located" failure.
                 if (round < rounds) {
-                    const chatLen = (ctx().chat || []).length;
-                    const winStart = Math.max(0, chatLen - numSetting(settings.recentFull, defaults.recentFull, 0, 100));
+                    // The same VISIBLE window the context block served: a ghosted
+                    // row inside the raw tail was never read, so an edit aimed at
+                    // it is blind even though its raw id looks "recent".
+                    const winSet = new Set(visibleIds(ctx().chat || []).slice(-numSetting(settings.recentFull, defaults.recentFull, 0, 100)));
                     let blind = [];
-                    try { blind = blindEditTargets(parseEdits(reply).edits, winStart, fetchedIds); } catch (_) { /* ignore */ }
+                    try { blind = blindEditTargets(parseEdits(reply).edits, winSet, fetchedIds); } catch (_) { /* ignore */ }
                     if (blind.length) {
                         blind.forEach(id => fetchedIds.add(id));
                         const bnote = 'Auto-fetched #' + blind.join(', #') + ' \u2014 the assistant proposed an edit to it without reading it in full, so its exact text was supplied for a correct re-proposal.';

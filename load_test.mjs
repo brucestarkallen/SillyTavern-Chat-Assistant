@@ -2113,6 +2113,63 @@ ok(/fetch block was malformed again/.test(gLog), 'the second failure is loud —
 ok(!/Ran out of fetch rounds/.test(gLog), 'and it is NOT misreported as fetch-round exhaustion');
 ok((SRC.match(/\[FETCH ERROR\]/g) || []).length === 2, 'the audit loop coaches a malformed fetch the same way — the fix is a class, not an instance');
 
+console.log('== v2.80.0: the full-text window counts VISIBLE messages ==');
+// "Recent msgs sent in full" used to count RAW chat rows: 100 over a chat with
+// 14 unghosted messages shipped the last 100 raw rows — ghosted entries inside
+// the tail included, even though their content already lives in memory (double
+// rent) and hidden ones were explicitly removed from AI context (a leak). The
+// window now takes the last N visible messages; fetch can still pull any id.
+dismissPending();
+CA.recentFull = 100;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'VISIBLE-ONE: the ferry left at dawn.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'VISIBLE-TWO: the rain stopped by noon.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'GHOSTROW-SECRET: the old mill burned down.', is_system: true });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'VISIBLE-THREE: she kept the brass key.' });
+ctx.chatMetadata.summaryception = { ghostedIndices: [2] };
+ctx.chatMetadata.summary_memory = 'a summary of the older events';
+ctx.chatMetadata.summary_ledger = 'nothing here';
+
+let vSeen = '';
+ctx.ConnectionManagerRequestService = { sendRequest: async (pid, messages) => { vSeen = messages.map(m => String(m.content || '')).join('\n'); return 'Nothing to fix.'; } };
+document.getElementById('cc_input').value = 'anything wrong?';
+clickFresh('cc_send');
+await sleep(700);
+ok(/FULL MESSAGES\] \(last 3\)/.test(vSeen), 'the window header counts visible messages, not raw rows (3 visible of 4 rows, setting 100)');
+ok(vSeen.includes('VISIBLE-ONE') && vSeen.includes('VISIBLE-TWO') && vSeen.includes('VISIBLE-THREE'), 'every visible message is served whole');
+ok(!/GHOSTROW-SECRET/.test(vSeen), 'the ghosted row is NOT shipped — its content is already paid for by the memory snippet');
+
+console.log('== v2.80.0: the blind-edit guard uses the same visible window ==');
+// Six raw rows, #4 ghosted. Raw-arithmetic window (last 4) would be rows 2-5;
+// the VISIBLE window (last 4 of 0,1,2,3,5) is rows 1,2,3,5.
+dismissPending();
+CA.recentFull = 4;
+ctx.chat.length = 0;
+for (let i = 0; i < 6; i++) ctx.chat.push({ is_user: false, name: 'N', mes: 'Row ' + i + ': the lanterns were lit at dusk.' });
+ctx.chat[1].mes = 'Row 1: the QQXARO was lit at dusk.';
+ctx.chat[4].is_system = true;
+ctx.chat[4].mes = 'Row 4: GHOSTLANTERN the old millwheel creaked.';
+ctx.chatMetadata.summaryception = { ghostedIndices: [4] };
+
+let bTurn = 0;
+ctx.ConnectionManagerRequestService = { sendRequest: async () => { bTurn++; return '<edits>[{"id":1,"find":"QQXARO was lit","replace":"ZZTARO was lit","reason":"test"}]</edits>'; } };
+document.getElementById('cc_input').value = 'fix row 1';
+clickFresh('cc_send');
+await sleep(900);
+ok(bTurn === 1, 'an edit to a VISIBLE in-window message costs no blind-fetch round, even though raw arithmetic put it outside (got ' + bTurn + ')');
+
+dismissPending();
+bTurn = 0;
+const bStart = ccLogText().length;
+ctx.ConnectionManagerRequestService = { sendRequest: async () => { bTurn++; return '<edits>[{"id":4,"find":"millwheel creaked","replace":"millwheel sang","reason":"test"}]</edits>'; } };
+document.getElementById('cc_input').value = 'fix row 4';
+clickFresh('cc_send');
+await sleep(900);
+ok(bTurn === 2, 'an edit to a GHOSTED row inside the raw tail is auto-fetched first — it was never read (got ' + bTurn + ' calls)');
+ok(/Auto-fetched #4/.test(ccLogText().slice(bStart).join('\n')), 'and the auto-fetch says why');
+CA.recentFull = 8;
+delete ctx.chatMetadata.summaryception;
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
