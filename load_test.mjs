@@ -2060,6 +2060,59 @@ ok(/WITHDRAW it by naming its exact label in a <supersede> block/.test(SRC) && /
 ok(/never dropped silently/.test(SRC) && /WITHDRAW it by naming its exact label in a <supersede> block/.test(SRC), 'the failed-proposal coaching ends in the re-propose-or-withdraw fork');
 ok(!/Do not re-send proposals that are no longer needed/.test(SRC), 'the old "just do not re-send it" instruction — the inaction that caused the loop — is gone');
 
+console.log('== v2.79.0: a malformed fetch is coached, not swallowed ==');
+// The fetch protocol had a silent-death gap: a block with no usable id list
+// parsed to the same null as "no fetch requested". The prose around it ("let me
+// fetch the chat…") was displayed, the block stripped from view, and nothing
+// ever came back — the user watched the assistant announce a fetch that never
+// ran. parseFetch now distinguishes ABSENT from UNREADABLE and says why, and
+// the loop coaches the model once instead of swallowing the attempt.
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'Sister', mes: 'I told him about my ex boyfriend that afternoon.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'The evening passed quietly.' });
+ctx.chatMetadata.summary_memory = 'nothing about an ex';
+ctx.chatMetadata.summary_ledger = 'nothing either';
+
+let fTurn = 0;
+const fSeen = [];
+const fStart = ccLogText().length;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        fSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        fTurn++;
+        if (fTurn === 1) return 'Let me fetch the chat to check.\n<fetch>the sister messages</fetch>';
+        if (fTurn === 2) return '<fetch>[0]</fetch>';
+        return 'Yes \u2014 she told him about her ex, in message #0.';
+    },
+};
+document.getElementById('cc_input').value = 'did his sister ever tell him about an ex?';
+clickFresh('cc_send');
+await sleep(1200);
+const fLog = ccLogText().slice(fStart).join('\n');
+ok(fTurn === 3, 'the malformed fetch costs one coaching round, then the resent valid request is served (got ' + fTurn + ' calls)');
+ok(/tried to fetch messages but its block was unreadable/.test(fLog), 'the failed fetch is reported to the user instead of vanishing');
+ok(/FETCH ERROR/.test(fSeen[1] || '') && /ONLY real numeric ids/.test(fSeen[1] || ''), 'the model is handed the reason and the correct shape');
+ok(/Assistant read full text of #0/.test(fLog), 'the resent, valid fetch is served normally');
+ok(/she told him about her ex, in message #0/.test(fLog), 'and the answer lands, evidence-based');
+ok(/the user CANNOT fetch, only the block can/.test(fSeen[0] || '') && /never enough to say what was actually said or done/.test(fSeen[0] || ''), 'the system prompt forbids permission-asking, announcing, and answering from previews');
+
+console.log('== v2.79.0: a twice-malformed fetch stops loudly, never loops ==');
+dismissPending();
+fTurn = 0;
+const gStart = ccLogText().length;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async () => { fTurn++; return 'Fetching now.\n<fetch>chat about the sister</fetch>'; },
+};
+document.getElementById('cc_input').value = 'what did the sister say?';
+clickFresh('cc_send');
+await sleep(1000);
+const gLog = ccLogText().slice(gStart).join('\n');
+ok(fTurn === 2, 'a repeat-malformed fetch gets exactly ONE coaching round, then stops (got ' + fTurn + ' calls)');
+ok(/fetch block was malformed again/.test(gLog), 'the second failure is loud — the reply never passes as answered');
+ok(!/Ran out of fetch rounds/.test(gLog), 'and it is NOT misreported as fetch-round exhaustion');
+ok((SRC.match(/\[FETCH ERROR\]/g) || []).length === 2, 'the audit loop coaches a malformed fetch the same way — the fix is a class, not an instance');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

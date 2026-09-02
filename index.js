@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.78.0';
+    const VERSION = '2.79.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -55,9 +55,9 @@
         '',
         'Rules:',
         '1. [STORY MEMORY] and the user\'s own statements outrank the chat text when they conflict.',
-        '2. If you must read messages that were not given in full, reply with ONLY this block and nothing else:',
+        '2. If answering or editing needs messages you were not given in full, fetch them YOURSELF \u2014 reply with ONLY this block and nothing else:',
         '<fetch>[12, 13, 27]</fetch>',
-        'Their full text will be sent to you, then you answer properly. A single part of an over-cap message is requested as "27#2" (id, #, part number).',
+        'Their full text is sent back to you automatically, then you answer properly. Fetching is free, instant, and needs NO permission: NEVER ask the user "want me to fetch?", "shall I fetch?", or anything like it \u2014 the user CANNOT fetch, only the block can, so asking just wastes a turn. Never ANNOUNCE a fetch in prose either: "let me fetch\u2026" does nothing, because the words are not the tool \u2014 the block IS the tool; if you intend to fetch, the block must be in the reply. The brackets take ONLY real numeric ids from [MESSAGE INDEX] (a single part of an over-cap message as "27#2") \u2014 never names, words, or descriptions. And answer from EVIDENCE, not previews: a [MESSAGE INDEX] line is a 150-character preview that tells you what is roughly where, never enough to say what was actually said or done \u2014 if [STORY MEMORY] and [FULL MESSAGES] do not settle the user\'s question, fetch the relevant ids FIRST and answer from their real text. A fetched answer is accurate; an answer guessed from previews is a hallucination.',
         '3. To change chat messages, include exactly one block in your reply:',
         '<edits>',
         '[',
@@ -2186,11 +2186,18 @@
     function parseFetch(text) {
         const b = findBlock(text, 'fetch');
         if (!b) return null;
+        // A block that EXISTS but cannot be read used to return null — identical
+        // to "no fetch requested". The prose around it ("let me fetch the chat…")
+        // was displayed, the block was stripped, and nothing ever came back: the
+        // user watched the assistant announce a fetch that silently never ran.
+        // An unreadable block now carries the reason, so both fetch loops can
+        // coach the model once instead of swallowing the attempt.
+        const bad = reason => ({ refs: [], dropped: [], error: reason });
         const m = b.inner.match(/\[[\s\S]*?\]/);
-        if (!m) return null;
+        if (!m) return bad('there is no [id, id] list inside the fetch block');
         try {
             const arr = parseJsonLoose(m[0]);
-            if (!Array.isArray(arr)) return null;
+            if (!Array.isArray(arr)) return bad('the fetch id list is not a JSON array');
             const all = [];
             const seen = new Set();
             for (const x of arr) {
@@ -2199,9 +2206,9 @@
                 seen.add(refKey(r));
                 all.push(r);
             }
-            if (!all.length) return null;
+            if (!all.length) return bad('the list holds no real message ids \u2014 ids are numbers from [MESSAGE INDEX], e.g. <fetch>[12, 13]</fetch>');
             return { refs: all.slice(0, FETCH_REF_CAP), dropped: all.slice(FETCH_REF_CAP) };
-        } catch (e) { return null; }
+        } catch (e) { return bad('the fetch id list is not valid JSON (' + (e && e.message ? e.message : e) + ')'); }
     }
 
     function parseEdits(text) {
@@ -3760,6 +3767,7 @@
             const fetchedRefs = new Set();   // id#part keys actually served
             let anchorRepaired = false;      // the anchor correction gets one round, not a loop
             let rippleChecked = false;       // so does the cross-surface sweep
+            let fetchCoached = false;        // and a malformed fetch block gets one coaching round
             for (let round = 0; round <= rounds; round++) {
                 if (round > 0) busy.innerHTML = esc('thinking\u2026 (call ' + (round + 1) + ' of ' + (rounds + 1) + ')');
                 const split = await callLLMSmart(messages, live);
@@ -3835,6 +3843,24 @@
                     }
                 }
                 const req = parseFetch(reply);
+                if (req && req.error) {
+                    // The model ANNOUNCED a fetch but sent a block that cannot be
+                    // read. Coach it once (a real correction round, not a loop),
+                    // then stop serving — but never silently: the user must see
+                    // that the fetch failed, or the reply reads as answered while
+                    // resting on nothing.
+                    if (!fetchCoached && round < rounds) {
+                        fetchCoached = true;
+                        const fnote = '\u26A0 The assistant tried to fetch messages but its block was unreadable (' + req.error + ') \u2014 asked it to resend a valid one.';
+                        addBubble('note', fnote); pushHistoryTo(sessObj, 'note', fnote);
+                        messages.push({ role: 'assistant', content: reply });
+                        messages.push({ role: 'user', content: '[FETCH ERROR] Your fetch block could not be read: ' + req.error + '. Resend it as a single block, <fetch>[12, 13]</fetch> \u2014 ONLY real numeric ids from [MESSAGE INDEX] inside the brackets (one part of an over-cap message as "27#2"). No names, words, or descriptions.' });
+                        continue;
+                    }
+                    const fnote2 = '\u26A0 The assistant\u2019s fetch block was malformed again \u2014 its reply above may rest on incomplete reading. Re-ask, or raise "Fetch rounds" in settings.';
+                    addBubble('note', fnote2); pushHistoryTo(sessObj, 'note', fnote2);
+                    break;
+                }
                 if (!req || round === rounds) break;
                 const fresh = req.refs.filter(r => !fetchedRefs.has(refKey(r)));
                 req.refs.forEach(r => {
@@ -3857,7 +3883,8 @@
                     messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n(All requested ids were already provided earlier in this conversation \u2014 re-read them above instead of re-fetching. If you need DIFFERENT messages, fetch those; otherwise produce your complete final answer.)' });
                 }
             }
-            const exhausted = !!parseFetch(reply);
+            const lastFetch = parseFetch(reply);
+            const exhausted = !!(lastFetch && !lastFetch.error);   // a malformed block was already reported on its own
 
             busy.remove();
             if (!sameChat(chatAt)) {
@@ -4057,6 +4084,7 @@
         let reply = '';
         let anchorFixed = false;
         let rippleFixed = false;
+        let fetchCoached = false;            // a malformed fetch block gets one coaching round, not silence
         // The audit gets the anchor pre-flight too, and always at least one round for
         // it: a sweep that stages dead cards makes the user do the extension's job.
         const maxRounds = Math.max(rounds, 2);   // room for the anchor round AND the ripple round
@@ -4090,6 +4118,16 @@
                 }
             }
             const req = parseFetch(reply);
+            if (req && req.error) {
+                // Same silent-swallow fix as the chat loop: coach once, then stop.
+                if (!fetchCoached) {
+                    fetchCoached = true;
+                    messages.push({ role: 'assistant', content: reply });
+                    messages.push({ role: 'user', content: '[FETCH ERROR] Your fetch block could not be read: ' + req.error + '. Resend it as a single block, <fetch>[12, 13]</fetch> \u2014 ONLY real numeric ids from [MESSAGE INDEX] inside the brackets (one part of an over-cap message as "27#2"). No names, words, or descriptions.' });
+                    continue;
+                }
+                break;
+            }
             if (!req) break;
             messages.push({ role: 'assistant', content: reply });
             messages.push({ role: 'user', content: '[FETCHED MESSAGES]\n' + fullTextOf(req.refs, 0) });
