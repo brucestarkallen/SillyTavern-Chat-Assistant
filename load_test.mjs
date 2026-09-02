@@ -2170,6 +2170,37 @@ ok(/Auto-fetched #4/.test(ccLogText().slice(bStart).join('\n')), 'and the auto-f
 CA.recentFull = 8;
 delete ctx.chatMetadata.summaryception;
 
+console.log('== v2.81.0: a ghosted original is fetchable on demand ==');
+// "NEVER unhide ghosted messages" sits one bullet away from the fetch rules, so
+// a careful model could read it as "never touch ghosted messages at all". The
+// rules now separate READING (lawful, on a real doubt) from UNHIDING
+// (forbidden). Mechanically the fetch path has never filtered is_system — the
+// audit's <verify> pass depends on it — and this guard keeps it that way.
+dismissPending();
+CA.recentFull = 8;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'Visible row with plain text.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'GHOSTORIGINAL: the precise wording of the old event.', is_system: true });
+ctx.chatMetadata.summaryception = { ghostedIndices: [1] };
+ctx.chatMetadata.summary_memory = 'a thin summary of the old event';
+ctx.chatMetadata.summary_ledger = 'nothing here';
+let gTurn = 0;
+const gSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        gSeen.push(messages.map(m => String(m.content || '')).join('\n'));
+        gTurn++;
+        if (gTurn === 1) return '<fetch>[1]</fetch>';
+        return 'The original wording is now in hand.';
+    },
+};
+document.getElementById('cc_input').value = 'what exactly happened back then?';
+clickFresh('cc_send');
+await sleep(900);
+ok(gTurn === 2 && /GHOSTORIGINAL/.test(gSeen[1] || ''), 'a ghosted id fetches like any other — the original is served whole');
+ok(/READABLE on demand/.test(gSeen[0] || '') && /forbidden is UNHIDING it, not reading it/.test(gSeen[0] || ''), 'the edit rules separate reading a ghost (lawful) from unhiding it (forbidden)');
+delete ctx.chatMetadata.summaryception;
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

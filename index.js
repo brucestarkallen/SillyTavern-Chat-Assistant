@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.80.0';
+    const VERSION = '2.81.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -123,6 +123,7 @@
         '- HARD RULE \u2014 fetch before you edit: NEVER propose an <edits> change to a chat message unless its FULL text is already present above (in [FULL MESSAGES] or a fetch result). If you only have its one-line [MESSAGE INDEX] preview, you MUST <fetch> that id FIRST, wait for its text, and THEN copy the "find" verbatim from it. Reconstructing or guessing the wording of a message you have not fetched will not match and will fail \u2014 fetch, never guess.',
         '- To HIDE a message from the AI context without deleting it (e.g. OOC/meta exchanges), use {"id": 12, "hide": true, "reason": "..."} inside <edits>. Use {"id": 12, "hide": false} to unhide. Hiding works on user messages too; the text stays visible in the log but leaves the AI context.',
         '- The [MESSAGE INDEX] tags hidden messages "(hidden)" and memory-ghosted ones "(ghosted by memory)". You may unhide "(hidden)" messages when asked; NEVER unhide "(ghosted by memory)" ones \u2014 their content lives in the memory snippets.',
+        '- Ghosted originals stay READABLE on demand: when the exact original wording matters (settling a contradiction, checking a snippet that looks thin or wrong, editing one), <fetch> the ghosted id like any other \u2014 what is forbidden is UNHIDING it, not reading it. Reach for the memory snippet first; pull the original only on a real doubt.',
         '- Messages you hid are remembered in a ledger even if another extension later makes them visible again (the index will note this). If the user asks to "re-hide my OOC", emit hide edits for every id in that note.',
         '- In explanations, refer to blocks WITHOUT angle brackets (write "edits block", "memedits block", "fetch"). The literal tags must appear ONLY wrapping the actual JSON, never inside prose.',
         '- Anchors ("find") must be UNIQUE within their target message \u2014 the applier REJECTS ambiguous anchors. When in doubt, extend the excerpt a few words on each side.',
