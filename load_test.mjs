@@ -2201,6 +2201,51 @@ ok(gTurn === 2 && /GHOSTORIGINAL/.test(gSeen[1] || ''), 'a ghosted id fetches li
 ok(/READABLE on demand/.test(gSeen[0] || '') && /forbidden is UNHIDING it, not reading it/.test(gSeen[0] || ''), 'the edit rules separate reading a ghost (lawful) from unhiding it (forbidden)');
 delete ctx.chatMetadata.summaryception;
 
+console.log('== v2.82.0: a dead-anchor card is marked STALE in the list the model reads ==');
+// The model agreed with the user THREE times that a staged chat fix was
+// unnecessary before the card actually died — because nothing ON the card told
+// it the anchor was already dead, and no rule named the moment "you just agreed
+// with the user". The pending block now re-checks every active anchor against
+// the live text and prints STALE on the dead ones, and the closing rule names
+// the trap: agreeing in prose without the <supersede> block IS the failure.
+dismissPending();
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'N', mes: 'The QQXARO bell rang twice.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'After that, silence.' });
+ctx.chatMetadata.summary_memory = 'nothing about bells';
+ctx.chatMetadata.summary_ledger = 'nothing here';
+CA.recentFull = 8;
+
+ctx.ConnectionManagerRequestService = { sendRequest: async () => '<edits>[{"id":0,"find":"QQXARO bell","replace":"ZZTARO bell","reason":"wrong bell"}]</edits>' };
+document.getElementById('cc_input').value = 'fix the bell name';
+clickFresh('cc_send');
+await sleep(900);
+
+// The text moves under the staged card (fixed by another route): the anchor is
+// dead now. The next request must SHOW that on the card's own line.
+ctx.chat[0].mes = 'The ZZTARO bell rang twice.';
+
+const sSeen = [];
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const joined = messages.map(m => String(m.content || '')).join('\n');
+        sSeen.push(joined);
+        const lm = joined.match(/(Chat fix \d+) \[message #0\][^\n]*QQXARO bell[^\n]*STALE/);
+        if (lm) return 'You\u2019re right \u2014 that chat fix is already done.\n<supersede>' + lm[1] + '</supersede>';
+        return 'I see no stale card, so I am saying so in prose \u2014 and doing nothing about it.';
+    },
+};
+const sStart = ccLogText().length;
+document.getElementById('cc_input').value = 'is that fix still needed?';
+clickFresh('cc_send');
+await sleep(900);
+const sBlock = sSeen[0] || '';
+const staleLine = (sBlock.match(/Chat fix \d+ \[message #0\][^\n]*/) || [''])[0];
+ok(/STALE/.test(staleLine) && /QQXARO bell/.test(staleLine), 'the card whose anchor just died is marked STALE on its own line');
+ok(/marked STALE has a "find" that no longer matches/.test(sBlock), 'and the block teaches what a stale line is for');
+ok(/AGREEING with the user/.test(sBlock) && /rides in THAT SAME reply/.test(sBlock), 'the agree-without-withdrawing trap is named in the rule itself');
+ok(/the assistant withdrew/i.test(ccLogText().slice(sStart).join('\n')), 'reading its own STALE line, the model withdraws the card in the same reply');
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }

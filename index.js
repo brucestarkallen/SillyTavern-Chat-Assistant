@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.81.0';
+    const VERSION = '2.82.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -5904,7 +5904,15 @@
                 summary = (edit.hide !== null && edit.hide !== undefined) ? (edit.hide ? 'hide from AI context' : 'unhide') : ((edit.find == null) ? 'replace whole message' : ('"' + clip(edit.find) + '" \u2192 "' + clip(edit.replace) + '"'));
             }
             const status = (edit.kind === 'wi') ? edit.editStatus : edit.status;
-            return x.label + ' [' + target + ']' + (status && status !== 'pending' ? ' (' + status + ')' : '') + ': ' + summary + (edit.reason ? ' \u2014 ' + edit.reason : '');
+            // A pending card whose anchor no longer matches is dead weight the
+            // model cannot SEE is dead: the line reads exactly as confident as
+            // the day it was staged, so the model apologizes for the card in
+            // prose and leaves it staged. Re-check the anchor HERE, against the
+            // live text, and print the verdict on the line — "already fixed /
+            // the text moved" becomes a fact the model can act on (withdraw or
+            // re-anchor), never something it has to guess.
+            const stale = anchorIsDead(edit) ? ' \u2014 \u26A0 STALE: its "find" no longer matches the current text (already fixed or the text changed)' : '';
+            return x.label + ' [' + target + ']' + (status && status !== 'pending' ? ' (' + status + ')' : '') + ': ' + summary + (edit.reason ? ' \u2014 ' + edit.reason : '') + stale;
         });
         const failed = labeledAll.filter(function (x) {
             const stx = (x.edit.kind === 'wi') ? x.edit.editStatus : x.edit.status;
@@ -5923,7 +5931,7 @@
             (lines.length ? lines.join('\n') : '(none awaiting action)') +
             resolvedNote +
             failNote +
-            '\n\nWhen you next propose edits: only propose NEW fixes. If you are CORRECTING or REPLACING any pending proposal above, do NOT re-list it as-is \u2014 name its exact label(s) in a <supersede> block (e.g. <supersede>Memory fix 1, Chat fix 2</supersede>) and give the corrected version as a fresh edit; the superseded ones are auto-skipped so "Apply all" stays clean. If one is simply WRONG, MOOT or ALREADY RESOLVED \u2014 the current text already says the right thing, or another applied edit covered it \u2014 WITHDRAW it the same way: name its label(s) in a <supersede> block and send no replacement for it. The block is the ONLY thing that takes a proposal off this list \u2014 saying "dropping it" in prose changes nothing, and a dead proposal left unwithdrawn is re-listed here every turn. Refer to these by their labels when you talk to the user.';
+            '\n\nWhen you next propose edits: only propose NEW fixes. If you are CORRECTING or REPLACING any pending proposal above, do NOT re-list it as-is \u2014 name its exact label(s) in a <supersede> block (e.g. <supersede>Memory fix 1, Chat fix 2</supersede>) and give the corrected version as a fresh edit; the superseded ones are auto-skipped so "Apply all" stays clean. If one is simply WRONG, MOOT or ALREADY RESOLVED \u2014 the current text already says the right thing, another applied edit covered it, or the USER says it is not needed \u2014 WITHDRAW it the same way: name its label(s) in a <supersede> block and send no replacement for it. A line marked STALE has a "find" that no longer matches the live text \u2014 withdraw it unless you immediately re-anchor it. And the moment that matters most: when you catch yourself AGREEING with the user that a pending proposal is unnecessary ("you\'re right, that chat fix isn\'t needed"), the <supersede> block rides in THAT SAME reply \u2014 agreeing in prose and moving on leaves the bad proposal staged and re-listed here next turn, which is exactly the failure the user is complaining about. The block is the ONLY thing that takes a proposal off this list \u2014 saying "dropping it" in prose changes nothing, and a dead proposal left unwithdrawn is re-listed here every turn. Refer to these by their labels when you talk to the user.';
     }
 
     // Parse a <supersede> block: pending-proposal labels the new reply replaces.
