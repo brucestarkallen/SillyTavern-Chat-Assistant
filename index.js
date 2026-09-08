@@ -17,7 +17,7 @@
 
     const MODULE = 'continuityCopilot';
     const LOG = '[ChatAssistant]';
-    const VERSION = '2.82.0';
+    const VERSION = '2.83.0';
 
     // ------------------------------------------------------------------
     // Defaults
@@ -224,6 +224,7 @@
         'Cross-check [STORY MEMORY] against itself: snippet vs snippet, snippet vs its own detail/audit field, ledger dossier vs the snippets, and dossier vs dossier. Find real contradictions (locations, timeline, character state, who-knows-what), duplicated or conflicting facts, epistemic leaks, and editorial contamination in CORE.',
         'The NOTEPAD is the exception: it records the OPENING state on purpose. Later events outgrowing it is progression, not a contradiction — do not "update", "refresh" or reconcile it, and do not report it. Touch it only for a contradiction internal to the notepad itself.',
         'Where two versions disagree, <fetch> the original messages to decide which is true before proposing anything.',
+        '"Invented" is the strongest verdict this pass can reach, and it is UNREACHABLE from memory alone: declaring that the chat does NOT contain an event requires reading every original message that could contain it \u2014 the coverage range, pulled complete. Until those originals are in hand, the lawful moves are naming the range in <verify> or reporting the entry UNVERIFIED \u2014 NEVER staging an edit that removes or softens a recorded fact on the strength of an absence you have not proven. "Not in what I was shown" is a finding; "not in the chat" is a claim you must earn with originals. And read for EVENT, not staging: a beat delivered indirectly \u2014 a watchlist line, a referenced off-screen exchange, narrator shorthand \u2014 is still the chat showing it; "not shown directly" is a style note, never grounds for an invented verdict.',
         'Propose corrections in a single <memedits> block, "find" copied character-for-character from [STORY MEMORY]. If the memory is internally consistent, say exactly: MEMORY CONSISTENT.',
         'Then, SEPARATELY, list every message you would need to READ to settle a doubt you could not resolve from the memory alone \u2014 a snippet that looks wrong, thin, self-contradicting, or that records something the ledger denies. Use the snippet\'s own "(covers chat messages #x to #y)" note to name them:',
         '<verify>[41, "58-63"]</verify>',
@@ -242,7 +243,9 @@
     const AUDIT_VERIFY_PROMPT = [
         'DEEP AUDIT \u2014 PASS 4 of 4: VERIFY THE DOUBTS.',
         'The previous pass could not settle these from the memory alone, so the ORIGINAL messages behind them have been pulled and are served COMPLETE below \u2014 most are ghosted, and this is the only place they get read.',
+        'FIRST, clean up after the earlier passes: if [PENDING PROPOSALS] is present above, re-examine every staged proposal against the originals you now hold \u2014 above all any that called a recorded event invented, missing, or absent \u2014 and WITHDRAW each one the evidence refutes by naming its label in a <supersede> block. A proposal the originals contradict must not survive to the user\u2019s review.',
         'Against the originals, settle each doubt: does the memory record what actually happened? Is every concrete fact preserved (names, numbers, objects, places, injuries, promises, who-knows-what)? Was anything load-bearing LOST or DISTORTED in the summarizing?',
+        'Read for EVENT, not staging: a beat delivered indirectly (a watchlist line, an off-screen reference, narrator shorthand) still counts as the chat showing it \u2014 "not shown directly" is a style observation, never an invention verdict.',
         'Repair the MEMORY with <memedits> \u2014 restore what was lost into the snippet text or its detail field, correct what was distorted, and never delete detail to make it shorter. Repair the MESSAGE with <edits> only when the original itself is the thing that is wrong.',
         'State each verdict against the original, not against your impression. If a doubt turns out to be unfounded, say so plainly. If everything checks out, say exactly: DOUBTS RESOLVED.',
     ].join('\n');
@@ -4429,6 +4432,10 @@
                         const reply = await auditAsk([
                             sysPrompt(),
                             AUDITOR_DOCTRINE,
+                            // The verify pass is where conviction-style proposals
+                            // from earlier passes get refuted by evidence — it can
+                            // only withdraw them if it can SEE them (with labels).
+                            pendingProposalsBlock(),
                             '[STORY MEMORY]\n' + memText,
                             '[ORIGINAL MESSAGES UNDER DOUBT]\n' + fullTextOf(batch, 0),
                         ], AUDIT_VERIFY_PROMPT + extraLine, numSetting(settings.auditFetchRounds, defaults.auditFetchRounds, 0, 4), tick, stats);

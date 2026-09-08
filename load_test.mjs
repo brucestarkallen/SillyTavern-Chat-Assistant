@@ -2246,6 +2246,56 @@ ok(/marked STALE has a "find" that no longer matches/.test(sBlock), 'and the blo
 ok(/AGREEING with the user/.test(sBlock) && /rides in THAT SAME reply/.test(sBlock), 'the agree-without-withdrawing trap is named in the rule itself');
 ok(/the assistant withdrew/i.test(ccLogText().slice(sStart).join('\n')), 'reading its own STALE line, the model withdraws the card in the same reply');
 
+console.log('== v2.83.0: a conviction staged in pass 3 is refuted and withdrawn in pass 4 ==');
+// The audit's most dangerous failure: pass 3 declares a recorded beat
+// "invented" and stages removal edits across the memory — founded on chat text
+// it never read (ghosted originals carry no preview in the index). The absence
+// law now makes "invented" unreachable from memory alone, and pass 4 receives
+// the pending list beside the originals with a mandate to withdraw whatever the
+// evidence refutes — before the user ever reviews the staging area.
+dismissPending();
+CA.auditWindow = 4;
+CA.recentFull = 8;
+ctx.chat.length = 0;
+ctx.chat.push({ is_user: false, name: 'Vanessa', mes: 'VANORIGINAL-A: Vanessa asked Rias for the number outright.', is_system: true });
+ctx.chat.push({ is_user: false, name: 'Rias', mes: 'VANORIGINAL-B: Rias refused, told her to act expensive, and gave nothing.', is_system: true });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'Visible scene one at the keep.' });
+ctx.chat.push({ is_user: false, name: 'N', mes: 'Visible scene two at the keep.' });
+ctx.chatMetadata.summaryception = { ghostedIndices: [0, 1] };
+ctx.chatMetadata.summary_memory = 'SNIPPET: Rias denied Vanessa the number, calling Jovan new money and act expensive. (covers chat messages #0 to #1)';
+ctx.chatMetadata.summary_ledger = 'Vanessa \u2014 STATE: rerouting after the refusal.';
+
+const aSeen = {};
+let pass4Label = null;
+ctx.ConnectionManagerRequestService = {
+    sendRequest: async (pid, messages) => {
+        const all = messages.map(m => String(m.content || '')).join('\n');
+        const pm = all.match(/PASS (\d) of 4/);
+        if (pm) aSeen[pm[1]] = all;
+        if (pm && pm[1] === '3') {
+            return 'The snippet asserts a refusal beat the chat never shows \u2014 invented.\n'
+                + '<memedits>[{"find":"Rias denied Vanessa the number","replace":"Rias hesitated about the number","reason":"soften an invented beat"}]</memedits>\n'
+                + '<verify>[0, 1]</verify>';
+        }
+        if (pm && pm[1] === '4') {
+            const lm = all.match(/(Memory fix \d+) \[memory\][^\n]*Rias denied Vanessa/);
+            pass4Label = lm ? lm[1] : null;
+            return (lm ? 'The originals show the refusal plainly \u2014 the pass-3 conviction was wrong.\n<supersede>' + lm[1] + '</supersede>\n' : '')
+                + 'DOUBTS RESOLVED';
+        }
+        return 'WINDOW CLEAN';
+    },
+};
+const aStart = ccLogText().length;
+document.getElementById('cc_input').value = '#m';
+clickFresh('cc_send');
+await sleep(2000);
+ok(/UNREACHABLE from memory alone/.test(aSeen['3'] || ''), 'the memory pass carries the absence law — conviction requires the originals in hand');
+ok(/PENDING PROPOSALS/.test(aSeen['4'] || '') && /clean up after the earlier passes/.test(aSeen['4'] || ''), 'the verify pass receives the staged list AND the re-review mandate');
+ok(/VANORIGINAL-A/.test(aSeen['4'] || '') && /VANORIGINAL-B/.test(aSeen['4'] || ''), 'the ghosted originals are served beside it');
+ok(!!pass4Label && /the assistant withdrew/i.test(ccLogText().slice(aStart).join('\n')), 'the refuted conviction is withdrawn inside the same audit run — never a live card for the user');
+delete ctx.chatMetadata.summaryception;
+
 console.log('');
 console.log('RESULT: ' + pass + ' passed, ' + fail + ' failed');
 if (fail > 0) { console.log('MODULE INTEGRITY FAILED ✗'); process.exit(1); }
